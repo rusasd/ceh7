@@ -1148,6 +1148,13 @@ function update(dt) {
 }
 
 // ---------- сеть ----------
+// Сервер — тот же сайт, откуда открыта игра. Сборка для itch.io (npm run itch) прописывает адрес Worker’а в meta.
+const serverMeta = document.querySelector('meta[name="ceh7-server"]');
+const SERVER = serverMeta ? serverMeta.content : `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+// приглашение ведёт на сайт игры: с itch.io — на workers.dev, там вход по ссылке сразу в комнату
+const SITE = serverMeta ? SERVER.replace(/^ws/, 'http') + '/' : location.origin + location.pathname;
+// версия сетевых сообщений: игра есть и на своём сайте, и на itch.io — разные версии в одну комнату не пускаем
+const VERSION = 2;
 let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
@@ -1162,9 +1169,8 @@ const net = {
   connect() {
     clearTimeout(this.timer);
     if (!this.want) return;
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     let ws;
-    try { ws = new WebSocket(`${proto}://${location.host}/ws?room=${this.room}&role=${this.role}&token=${token}`); }
+    try { ws = new WebSocket(`${SERVER}/ws?room=${this.room}&role=${this.role}&token=${token}`); }
     catch (e) { this.retry(); return; }
     this.ws = ws;
     // на мобильной сети подключение может «повиснуть» без ошибки — не ждём дольше 8 секунд
@@ -1332,7 +1338,8 @@ function applyRoster(m) {
   setSeat(e ? e.seat : -1);
   refreshStatus();
 }
-function hostWelcome(pid) {
+function hostWelcome(pid, v) {
+  if (v !== VERSION) { net.send({ t: 'version', to: pid, v: VERSION }); return; }
   const e = rosterAdd(pid);
   if (!e) { net.send({ t: 'full', to: pid }); return; }
   broadcastRoster();
@@ -1405,7 +1412,7 @@ function onServer(m) {
       } else {
         const h = (m.peers || []).find(p => p.role === 'host');
         hostPid = h ? h.pid : '';
-        if (hostPid) net.send({ t: 'hello' });
+        if (hostPid) net.send({ t: 'hello', v: VERSION });
       }
       announce();
       refreshStatus();
@@ -1413,7 +1420,7 @@ function onServer(m) {
     case 'join': {
       online.add(m.pid);
       sfx.join();
-      if (m.role === 'host') { hostPid = m.pid; if (role !== 'host') net.send({ t: 'hello' }); }
+      if (m.role === 'host') { hostPid = m.pid; if (role !== 'host') net.send({ t: 'hello', v: VERSION }); }
       announce();
       refreshStatus();
       break;
@@ -1433,8 +1440,11 @@ function onNet(m, from) {
   if (!from) { onServer(m); return; }
   const fs = seatOf(from), fromHost = from === hostPid;
   switch (m.t) {
-    case 'hello': if (role === 'host') hostWelcome(from); break;
+    case 'hello': if (role === 'host') hostWelcome(from, m.v); break;
     case 'full': if (m.to === myPid && fromHost) leaveRoom(`В комнате ${net.room} уже четыре игрока`); break;
+    case 'version':
+      if (m.to === myPid && fromHost) leaveRoom(`У создателя комнаты ${+m.v > VERSION ? 'новая версия игры — обновите страницу' : 'старая версия игры — пусть обновит страницу'}`);
+      break;
     case 'roster': if (fromHost && role !== 'host') applyRoster(m); break;
     case 'sync': if (fromHost && m.to === myPid) applySync(m); break;
     case 'lobby':
@@ -2041,7 +2051,7 @@ function refreshStatus() {
   $('btnAgain').hidden = !host;
   if (state === 'shop') renderShop();
 }
-function inviteUrl() { return `${location.origin}${location.pathname}?room=${net.room}`; }
+function inviteUrl() { return `${SITE}?room=${net.room}`; }
 function showLobby() {
   state = 'lobby';
   const host = role === 'host';
@@ -2209,13 +2219,30 @@ function restoreSeat() {
   if (seat && /^\d{4}$/.test(seat.room) && (seat.role === 'host' || seat.role === 'guest')) enterRoom(seat.room, seat.role);
   else showSheet('menu');
 }
+// во фрейме itch.io часть возможностей браузера закрыта — их не трогаем, чтобы не сыпать ошибками в консоль
+const policy = document.permissionsPolicy || document.featurePolicy;
+const allowed = feature => !policy || policy.allowsFeature(feature);
 async function share() {
   const url = inviteUrl();
   try {
-    if (navigator.share) { await navigator.share({ title: 'Цех № 7', text: `Заходи в цех! Код комнаты ${net.room}`, url }); return; }
+    if (navigator.share && allowed('web-share')) { await navigator.share({ title: 'Цех № 7', text: `Заходи в цех! Код комнаты ${net.room}`, url }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
-  try { await navigator.clipboard.writeText(url); flashShare('Ссылка скопирована'); }
-  catch (e) { flashShare('Скопируйте ссылку ниже'); }
+  if (allowed('clipboard-write')) {
+    try { await navigator.clipboard.writeText(url); flashShare('Ссылка скопирована'); return; } catch (e) {}
+  }
+  flashShare(copyText(url) ? 'Ссылка скопирована' : 'Скопируйте ссылку ниже');
+}
+// во фрейме itch.io navigator.clipboard закрыт, а старый способ копирования работает
+function copyText(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.readOnly = true;
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) {}
+  ta.remove();
+  return ok;
 }
 function flashShare(text) {
   const b = $('btnShare');
@@ -2227,7 +2254,7 @@ function flashShare(text) {
 let wakeLock = null;
 async function keepAwake() {
   try {
-    if ('wakeLock' in navigator && !wakeLock) {
+    if ('wakeLock' in navigator && !wakeLock && allowed('screen-wake-lock')) {
       wakeLock = await navigator.wakeLock.request('screen');
       wakeLock.addEventListener('release', () => { wakeLock = null; });
     }
