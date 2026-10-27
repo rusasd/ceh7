@@ -1,7 +1,10 @@
 // Цех № 7 — данные игры и рисунки деталей. Общие для цеха и мастерских.
 export const T = 48, COLS = 9, ROWS = 12, W = COLS * T, H = ROWS * T;
 export const PI = Math.PI;
-export const C = { p1:'#ef7d2d', p1d:'#9c4d1b', p2:'#3aa0d8', p2d:'#215f86', hazard:'#f2c230', alarm:'#e0493b', ink:'#eef2ea' };
+export const C = {
+  p1:'#ef7d2d', p1d:'#9c4d1b', p2:'#3aa0d8', p2d:'#215f86', p3:'#58b95e', p3d:'#2f6f35', p4:'#b078e6', p4d:'#64408f',
+  hazard:'#f2c230', alarm:'#e0493b', ink:'#eef2ea',
+};
 export const FONT_D = '"Russo One","Arial Black",sans-serif';
 export const FONT_B = '"IBM Plex Sans",system-ui,sans-serif';
 

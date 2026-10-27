@@ -24,16 +24,19 @@
   --hazard-ink:#1b1d18;
   --p1:#ef7d2d;
   --p2:#3aa0d8;
+  --p3:#58b95e;
+  --p4:#b078e6;
   --alarm:#e0493b;
   --ok:#7be39a;
   --me:var(--p1);
-  --op:var(--p2);
   --f-display:'Russo One','Arial Black',Impact,sans-serif;
   --f-body:'IBM Plex Sans',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --f-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme:dark;
 }
-body.guest{--me:var(--p2);--op:var(--p1)}
+body[data-seat="1"]{--me:var(--p2)}
+body[data-seat="2"]{--me:var(--p3)}
+body[data-seat="3"]{--me:var(--p4)}
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%;overflow:hidden;overscroll-behavior:none}
 body{
@@ -58,11 +61,8 @@ input{user-select:text;-webkit-user-select:text}
   padding:6px 10px;border-radius:12px;background:var(--panel);border:1px solid var(--line);
 }
 .side{display:flex;flex-direction:column;min-width:0}
-.side.opp{align-items:flex-end;text-align:right}
 .who{font:600 10.5px/1.3 var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.score{font:400 26px/1.05 var(--f-display);font-variant-numeric:tabular-nums}
-.side.me .score{color:var(--me)}
-.side.opp .score{color:var(--op)}
+.score{font:400 26px/1.05 var(--f-display);font-variant-numeric:tabular-nums;color:var(--me)}
 .mid{display:flex;align-items:center;gap:5px}
 .rnd{font:600 11px/1 var(--f-mono);color:var(--ink-dim)}
 .time{font:600 16px/1 var(--f-mono);color:var(--hazard);background:var(--display);padding:6px 7px;border-radius:6px;font-variant-numeric:tabular-nums}
@@ -70,6 +70,14 @@ input{user-select:text;-webkit-user-select:text}
 @keyframes blink{50%{opacity:.45}}
 .ibtn{width:32px;height:28px;display:grid;place-items:center;border-radius:6px;border:1px solid var(--line);background:var(--panel-hi);padding:0}
 .ibtn svg{width:13px;height:13px;fill:var(--ink)}
+.others{display:flex;flex-direction:column;align-items:flex-end;gap:2px;min-width:0}
+.orow{display:flex;align-items:center;gap:5px;max-width:100%;white-space:nowrap}
+.orow i{width:9px;height:9px;border-radius:50%;flex:none}
+.orow b{font:400 15px/1.1 var(--f-display);font-variant-numeric:tabular-nums}
+.orow span{font:600 10.5px/1.2 var(--f-mono);letter-spacing:.04em;text-transform:uppercase;color:var(--ink-dim);overflow:hidden;text-overflow:ellipsis}
+.orow.alarm span{color:#ff8a7d}
+.others.solo .orow{flex-direction:row-reverse}
+.others.solo .orow b{font-size:26px}
 .orderbar{flex:none;display:flex;align-items:center;gap:8px;min-height:30px;padding:0 2px}
 .oname{font:600 12px/1.2 var(--f-body);color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .chips{display:flex;gap:4px;align-items:center;flex:none}
@@ -173,6 +181,13 @@ kbd{
 .status.ok::before{background:var(--ok)}
 .status.bad::before{background:var(--alarm)}
 .status.wait::before{background:var(--hazard);animation:blink 1s steps(2,start) infinite}
+.roster{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.roster li{display:grid;grid-template-columns:12px minmax(0,1fr);align-items:center;gap:1px 9px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:14px;line-height:1.25;min-width:0}
+.roster li i{grid-row:span 2;width:12px;height:12px;border-radius:50%}
+.roster li b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.roster li span{color:var(--ink-dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.roster li.empty{opacity:.45}
+.roster li.me{outline:2px solid var(--me)}
 .opts{display:flex;flex-direction:column;gap:8px}
 .dur{border:0;margin:0;padding:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
 .dur legend{float:left;width:72px;margin-right:2px;padding:0;font-size:14px;color:var(--ink-dim)}
@@ -209,9 +224,14 @@ kbd{
 /* итоги */
 .verdict{margin:0;font:400 48px/1 var(--f-display)}
 .verdict.win{color:var(--me)}
-.vscore{margin:0;font:400 26px/1.2 var(--f-display);font-variant-numeric:tabular-nums}
-.vscore .m{color:var(--me)}
-.vscore .o{color:var(--op)}
+.standings{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+.standings li{display:grid;grid-template-columns:26px 12px minmax(0,1fr) auto;align-items:center;gap:9px;padding:9px 12px;border-radius:8px;background:var(--bg)}
+.standings li.me{outline:2px solid var(--me)}
+.standings .pl{font:400 18px/1 var(--f-display);color:var(--ink-dim)}
+.standings i{width:12px;height:12px;border-radius:50%}
+.standings span{min-width:0;font-size:14px}
+.standings small{display:block;color:var(--ink-dim);font-size:12px}
+.standings b{font:400 22px/1 var(--f-display);font-variant-numeric:tabular-nums}
 
 .turn{
   display:none;position:fixed;inset:0;z-index:40;flex-direction:column;align-items:center;justify-content:center;gap:12px;
@@ -244,19 +264,19 @@ kbd{
 
 <div class="app">
   <header class="hud">
-    <div class="side me"><span class="who" id="meWho">Вы</span><span class="score" id="meScore">0</span></div>
+    <div class="side"><span class="who" id="meWho">Вы</span><span class="score" id="meScore">0</span></div>
     <div class="mid">
       <span class="rnd" id="rnd">Р1/3</span><span class="time" id="time">1:30</span>
       <button class="ibtn" id="btnPause" type="button" aria-label="Пауза"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2" width="3.5" height="12" rx="1"/><rect x="9.5" y="2" width="3.5" height="12" rx="1"/></svg></button>
     </div>
-    <div class="side opp"><span class="who" id="oppWho">В цехе</span><span class="score" id="oppScore">0</span></div>
+    <div class="others" id="others" aria-label="Соперники"></div>
   </header>
 
   <div class="orderbar"><span class="oname" id="oname"></span><div class="chips" id="chips"></div></div>
 
   <div class="field" id="field">
     <span class="evt" id="evt" hidden></span>
-    <canvas id="game" width="432" height="576" aria-label="Цех с конвейерной лентой или ваша мастерская со станками и верстаком"></canvas>
+    <canvas id="game" width="432" height="576" aria-label="Цех с конвейерной лентой или мастерская со станками и верстаком"></canvas>
   </div>
 
   <section class="pad" aria-label="Управление">
@@ -273,9 +293,9 @@ kbd{
   <div class="sheet" id="menuSheet">
     <div class="tape"></div>
     <div class="sheet-body">
-      <p class="eyebrow">Онлайн на двоих · у каждого свой телефон</p>
+      <p class="eyebrow">Онлайн · от 2 до 4 игроков</p>
       <h1>Цех № 7</h1>
-      <p class="lead">Общая лента в цехе и у каждого своя мастерская. Хватайте детали, делайте их на станках и собирайте заказы быстрее соперника.</p>
+      <p class="lead">Общая лента в цехе и у каждого своя мастерская. Хватайте детали, делайте их на станках, собирайте заказы — и наведывайтесь к соперникам за чужим добром.</p>
       <button class="btn primary wide" id="btnCreate" type="button">Создать игру</button>
       <p class="or">или войдите по коду</p>
       <form class="join" id="joinForm">
@@ -286,12 +306,13 @@ kbd{
       <div>
         <h3>Как играть</h3>
         <ul class="rules">
+          <li>Играют от двух до четырёх человек, у каждого свой телефон. Создатель комнаты отправляет остальным код или ссылку.</li>
           <li>Детали приходят на ленту в общем цехе. Хватайте нужные и несите через свою дверь в мастерскую.</li>
           <li>В мастерской ваши станки и верстак. Стекло, корпус, катушку, модуль и привод делают на станках, остальное кладут на верстак сразу.</li>
-          <li>Заказ виден над полем и на верстаке. Собрали всё — получили очки и новый заказ.</li>
-          <li>В цехе можно толкнуть соперника: детали из рук упадут на пол. В вашу мастерскую соперник не попадёт.</li>
-          <li>Лишнее можно оставить на полу мастерской. В цехе брошенное исчезает через 25 секунд.</li>
-          <li>Очки за раунды складываются. Между раундами — магазин улучшений, отстающему доплачивают.</li>
+          <li>Через чужую дверь можно зайти в мастерскую соперника и утащить детали с пола или готовое из станков. Чужими станками и верстаком пользоваться нельзя.</li>
+          <li>Соперника можно толкнуть: детали из рук упадут на пол.</li>
+          <li>В цехе брошенное исчезает через 25 секунд, в мастерской лежит до конца раунда.</li>
+          <li>Очки за раунды складываются. Между раундами — магазин улучшений, отстающим доплачивают.</li>
         </ul>
       </div>
       <div>
@@ -322,6 +343,7 @@ kbd{
       <p class="code" id="lobbyCode">0000</p>
       <p class="link" id="lobbyLink"></p>
       <button class="btn wide" id="btnShare" type="button">Отправить приглашение</button>
+      <ul class="roster" id="roster"></ul>
       <p class="status wait" id="lobbyStatus">Подключаемся…</p>
       <div class="opts" id="hostOpts">
         <fieldset class="dur">
@@ -341,6 +363,17 @@ kbd{
         <button class="btn primary" id="btnStart" type="button" disabled>Начать матч</button>
         <button class="btn" id="btnLeaveLobby" type="button">Выйти</button>
       </div>
+    </div>
+  </div>
+
+  <div class="sheet" id="waitSheet" hidden>
+    <div class="tape"></div>
+    <div class="sheet-body">
+      <p class="eyebrow" id="waitEyebrow">Комната</p>
+      <h2>Идёт матч</h2>
+      <p class="lead">Вы сыграете в следующем: создатель комнаты начнёт его, когда этот закончится.</p>
+      <p class="status" id="waitStatus"></p>
+      <div class="actions"><button class="btn" id="btnLeaveWait" type="button">Выйти в меню</button></div>
     </div>
   </div>
 
@@ -368,8 +401,7 @@ kbd{
     <div class="sheet-body">
       <p class="eyebrow">Матч окончен</p>
       <p class="verdict" id="vTitle">Ничья</p>
-      <p class="vscore" id="vScore"></p>
-      <p class="lead" id="vSub"></p>
+      <ol class="standings" id="standings"></ol>
       <p class="status" id="overStatus"></p>
       <div class="actions">
         <button class="btn primary" id="btnAgain" type="button">Новый матч</button>
