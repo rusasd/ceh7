@@ -949,7 +949,15 @@ const net = {
     try { ws = new WebSocket(`${proto}://${location.host}/ws?room=${this.room}&role=${this.role}&token=${token}`); }
     catch (e) { this.retry(); return; }
     this.ws = ws;
+    // на мобильной сети подключение может «повиснуть» без ошибки — не ждём дольше 8 секунд
+    const stuck = setTimeout(() => {
+      if (ws !== this.ws || this.ok) return;
+      this.ws = null;
+      try { ws.close(); } catch (e) {}
+      this.retry();
+    }, 8000);
     ws.onopen = () => {
+      clearTimeout(stuck);
       if (ws !== this.ws) return;
       this.ok = true; this.tries = 0; this.lastRx = performance.now(); this.pingT = 4;
       refreshStatus();
@@ -963,6 +971,7 @@ const net = {
       if (m && typeof m.t === 'string') { try { onNet(m); } catch (err) { console.error(err); } }
     };
     ws.onclose = e => {
+      clearTimeout(stuck);
       if (ws !== this.ws) return;
       this.ws = null; this.ok = false; this.peer = false;
       if (e.code === 4001) { onNetBusy(); return; }
