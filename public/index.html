@@ -264,6 +264,66 @@ kbd{
   .up{min-height:54px}
   .up small{display:none}
 }
+/* ---------- кнопки «на весь экран» и панель мастерской — только с мышью и клавиатурой ---------- */
+.only-fine,.workbox,.wide-only,.orow em{display:none}
+@media (pointer:fine){
+  .ibtn.only-fine{display:grid}
+  .btn.only-fine{display:inline-block}
+}
+.workbox h4{margin:0;font:600 11px/1.3 var(--f-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim)}
+.wlist{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:7px}
+.wlist li{display:grid;grid-template-columns:32px minmax(0,1fr);grid-template-areas:"ico name" "ico st";gap:0 10px;align-items:center}
+.wlist .ico{grid-area:ico}
+.wlist b{grid-area:name;font:600 13px/1.3 var(--f-body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wlist span{grid-area:st;font:500 12px/1.3 var(--f-body);color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wlist li.off{opacity:.5}
+.wlist li.work span{color:var(--hazard)}
+.wlist li.ready span{color:var(--ok)}
+.wlist li.broken span{color:#ff8a7d}
+.wlist li.need b::after{content:" · для заказа";color:var(--me)}
+
+/* ---------- большой экран: компьютер и окно шире, чем выше (в том числе на весь экран).
+   Поле в центре на всю высоту, слева — счёт, заказ и мастерская, справа — время, соперники и пульт ---------- */
+@media (pointer:fine) and (min-width:900px) and (min-aspect-ratio:5/4){
+  body{padding-left:20px;padding-right:20px}
+  .app{
+    max-width:none;padding:14px 0;display:grid;gap:12px 18px;justify-content:center;
+    /* середина — не шире поля (оно 3:4 и упирается в высоту окна), так панели стоят вплотную к нему */
+    grid-template-columns:clamp(200px,22vw,300px) minmax(0,calc((100vh - 34px) * .75)) clamp(200px,22vw,300px);
+    grid-template-rows:auto auto minmax(0,1fr) auto auto;
+    grid-template-areas:"me field mid" "order field others" "work field others" "work field act" "work field keys";
+  }
+  .hud,.pad{display:contents}
+  .side,.mid,.others,.orderbar,.workbox,.zone{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;box-shadow:none}
+  .side{grid-area:me}
+  .who{font-size:12px}
+  .score{font-size:44px}
+  .score.duo{font-size:32px}
+  .mid{grid-area:mid;justify-content:space-between;gap:8px}
+  .rnd{font-size:14px}
+  .time{font-size:24px;padding:8px 10px}
+  .ibtn{width:40px;height:36px}
+  .ibtn svg{width:16px;height:16px}
+  .others{grid-area:others;align-items:stretch;justify-content:flex-start;gap:12px;min-height:0;overflow:auto}
+  .orow,.others.solo .orow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;grid-template-areas:"dot name sc" "dot where sc";gap:1px 10px;align-items:center}
+  .orow i{grid-area:dot;width:12px;height:12px}
+  .orow em{grid-area:name;display:block;font:600 14px/1.25 var(--f-body);color:var(--ink);overflow:hidden;text-overflow:ellipsis}
+  .orow span{grid-area:where;font-size:11px}
+  .orow b,.others.solo .orow b{grid-area:sc;font-size:26px}
+  .orderbar{grid-area:order;flex-direction:column;align-items:flex-start;gap:10px;min-height:0}
+  .orderbar::before{content:"Заказ";font:600 11px/1.3 var(--f-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-dim)}
+  .oname{font-size:16px;color:var(--ink);white-space:normal}
+  .chips{flex-wrap:wrap;gap:6px}
+  .chip{width:44px;height:44px}
+  .chip img{width:30px;height:30px}
+  .field{grid-area:field}
+  .act{grid-area:act;justify-self:stretch;align-self:stretch;width:auto;height:76px;aspect-ratio:auto;border-radius:12px}
+  .act span{max-width:none;font-size:17px}
+  .zone{grid-area:keys;display:block}
+  .key-hint{max-width:none;justify-content:flex-start;gap:4px;line-height:1.9;text-align:left}
+  .wide-only{display:inline}
+  .workbox{grid-area:work;display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto}
+}
 @media (prefers-reduced-motion:reduce){
   .time.rush,.up.bought,.status.wait::before{animation:none}
 }
@@ -277,6 +337,7 @@ kbd{
     <div class="mid">
       <span class="rnd" id="rnd">Р1/3</span><span class="time" id="time">1:30</span>
       <button class="ibtn" id="btnPause" type="button" aria-label="Пауза"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2" width="3.5" height="12" rx="1"/><rect x="9.5" y="2" width="3.5" height="12" rx="1"/></svg></button>
+      <button class="ibtn only-fine" id="btnFull" type="button" aria-label="На весь экран" title="На весь экран (F)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
     </div>
     <div class="others" id="others" aria-label="Соперники"></div>
   </header>
@@ -291,10 +352,16 @@ kbd{
   <section class="pad" aria-label="Управление">
     <div class="zone" id="zone">
       <span class="touch-hint">Ведите пальцем</span>
-      <span class="key-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки</span>
+      <span class="key-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки<span class="wide-only"> — ходить, <kbd>E</kbd> или <kbd>Пробел</kbd> — действие, <kbd>Esc</kbd> — пауза, <kbd>F</kbd> — весь экран</span></span>
       <span class="base"><span class="knob"></span></span>
     </div>
     <button class="act" id="act" type="button"><span id="actl">Действие</span></button>
+  </section>
+
+  <!-- видно только на большом экране -->
+  <section class="workbox" aria-label="Ваша мастерская">
+    <h4>Ваша мастерская</h4>
+    <ul class="wlist" id="workList"></ul>
   </section>
 </div>
 
@@ -352,7 +419,7 @@ kbd{
         </div>
       </div>
       <p class="keys-note">С клавиатуры: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки, действие — <kbd>E</kbd>, <kbd>Пробел</kbd> или <kbd>Enter</kbd>, пауза — <kbd>Esc</kbd>.</p>
-      <div class="actions"><button class="btn sound-btn" type="button">Звук: вкл</button></div>
+      <div class="actions"><button class="btn sound-btn" type="button">Звук: вкл</button><button class="btn full-btn only-fine" type="button">На весь экран</button></div>
     </div>
   </div>
 
@@ -417,6 +484,7 @@ kbd{
         <button class="btn primary" id="btnResume" type="button">Продолжить</button>
         <button class="btn" id="btnLeavePause" type="button">Выйти в меню</button>
         <button class="btn sound-btn" type="button">Звук: вкл</button>
+        <button class="btn full-btn only-fine" type="button">На весь экран</button>
       </div>
     </div>
   </div>

@@ -451,6 +451,7 @@ addEventListener('keydown', e => {
   if (playing() && GAME_KEYS.has(e.code)) e.preventDefault();
   if (e.code === 'Escape' || e.code === 'KeyP') { if (state === 'pause') resumeGame(true); else pauseGame(true); return; }
   if (e.repeat) return;
+  if (e.code === 'KeyF') { toggleFull(); return; }
   keys.add(e.code);
   if (KEYS.act.includes(e.code)) queueAction();
 });
@@ -2295,6 +2296,42 @@ function hudFrame() {
   const rt = `Р${Math.max(1, round)}/${rounds}`;
   if (rt !== shownRnd) { $('rnd').textContent = rt; shownRnd = rt; }
   renderOthers();
+  renderWorkbox();
+}
+// большой экран: сбоку — что творится в моей мастерской, пока я в цехе
+const wideMq = matchMedia('(pointer:fine) and (min-width:900px) and (min-aspect-ratio:5/4)');
+const workRows = Object.keys(MACHINES).map(type => {
+  const li = document.createElement('li');
+  const ico = document.createElement('span'); ico.className = 'ico'; ico.appendChild(iconImg(MACHINES[type].out, 22));
+  const b = document.createElement('b'); b.textContent = MACHINES[type].name;
+  const st = document.createElement('span');
+  li.append(ico, b, st);
+  $('workList').appendChild(li);
+  return { type, li, st, key: '' };
+});
+let workT = -1;
+function renderWorkbox() {
+  if (!wideMq.matches || clock - workT < 0.2) return;
+  workT = clock;
+  const live = inMatch() && matchState();
+  for (const r of workRows) {
+    const m = machines.find(x => x.type === r.type), def = MACHINES[r.type];
+    let cls = '', txt = '';
+    if (live) {
+      if (m.broken > 0) { cls = 'broken'; txt = 'поломка — почините'; }
+      else if (m.state === 'ready') { cls = 'ready'; txt = `готово: ${PARTS[def.out].name.toLowerCase()}`; }
+      else if (m.state === 'work') { cls = 'work'; txt = `работает · ${Math.max(1, Math.ceil(m.dur - m.t))} с`; }
+      else if (m.inputs.length) txt = `загружено ${m.inputs.length} из ${def.in.length}`;
+      else if (roundMade.includes(def.out)) txt = `ждёт: ${def.in.map(k => PARTS[k].name.toLowerCase()).join(' + ')}`;
+      else { cls = 'off'; txt = 'в этом раунде не пригодится'; }
+      if (needs(def.out)) cls += ' need';
+    } else cls = 'off';
+    const key = cls + txt;
+    if (key === r.key) continue;
+    r.key = key;
+    r.li.className = cls.trim();
+    r.st.textContent = txt;
+  }
 }
 function renderOthers() {
   // напарник — первым и с ободком у кружка, передовик «Схватки» — со звёздочкой
@@ -2311,9 +2348,10 @@ function renderOthers() {
     const row = document.createElement('div');
     row.className = 'orow' + (where.endsWith('у вас!') ? ' alarm' : '') + (mate ? ' mate' : '');
     const dotEl = document.createElement('i'); dotEl.style.background = colorOf(s);
+    const name = document.createElement('em'); name.textContent = SEAT[s].name + (mate ? ' · напарник' : '');   // видно на большом экране
     const b = document.createElement('b'); b.textContent = sc; b.style.color = colorOf(s);
     const span = document.createElement('span'); span.textContent = where;
-    row.append(dotEl, b, span);
+    row.append(dotEl, name, b, span);
     row.title = SEAT[s].name + (mate ? ' · напарник' : '');
     box.appendChild(row);
   }
@@ -2701,6 +2739,30 @@ soundBtns.forEach(b => b.addEventListener('click', () => {
   muted = !muted; ensureAudio(); syncSound();
   try { localStorage.setItem('ceh7-muted', muted ? '1' : '0'); } catch (err) {}
 }));
+// весь экран — на компьютере: кнопкой в табло, в меню или клавишей F
+const fullRoot = document.documentElement;
+const canFull = !!(fullRoot.requestFullscreen || fullRoot.webkitRequestFullscreen) && document.fullscreenEnabled !== false;
+const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+function toggleFull() {
+  if (!canFull) return;
+  try {
+    const p = isFull() ? (document.exitFullscreen || document.webkitExitFullscreen).call(document)
+      : (fullRoot.requestFullscreen || fullRoot.webkitRequestFullscreen).call(fullRoot);
+    if (p && p.catch) p.catch(() => {});
+  } catch (err) {}
+}
+const fullBtns = document.querySelectorAll('.full-btn');
+function syncFull() {
+  const on = isFull();
+  fullBtns.forEach(b => { b.textContent = on ? 'Обычный экран' : 'На весь экран'; });
+  $('btnFull').setAttribute('aria-label', on ? 'Обычный экран' : 'На весь экран');
+}
+if (!canFull) [...fullBtns, $('btnFull')].forEach(b => { b.hidden = true; });
+fullBtns.forEach(b => b.addEventListener('click', toggleFull));
+$('btnFull').addEventListener('click', e => { e.currentTarget.blur(); toggleFull(); });
+document.addEventListener('fullscreenchange', syncFull);
+document.addEventListener('webkitfullscreenchange', syncFull);
+
 const landscape = matchMedia('(pointer: coarse) and (orientation: landscape) and (max-height: 560px)');
 const onOrient = () => { if (landscape.matches) pauseGame(true); };
 if (landscape.addEventListener) landscape.addEventListener('change', onOrient);
