@@ -16,21 +16,34 @@ export const PARTS = {
   wire:   { name:'Медь',      val:10 },
   sand:   { name:'Песок',     val:0  },
   rubber: { name:'Резина',    val:10 },
+  battery:{ name:'Батарейка', val:15 },
+  plastic:{ name:'Пластик',   val:0  },
   glass:  { name:'Стекло',    val:15 },
+  lens:   { name:'Линза',     val:25 },
   shell:  { name:'Корпус',    val:20 },
+  keys:   { name:'Кнопки',    val:15 },
   coil:   { name:'Катушка',   val:20 },
+  tire:   { name:'Шина',      val:20 },
+  frame:  { name:'Рама',      val:25 },
   chip:   { name:'Модуль',    val:40 },
   drive:  { name:'Привод',    val:45 },
 };
-export const ORDER_KEYS = ['gear','bolt','board','wire','rubber','glass','shell','coil','chip','drive'];
-export const RAW = ['gear','bolt','board','blank','wire','sand','rubber'];
-export const RAW_OF = { glass:['sand'], shell:['blank'], coil:['wire'], chip:['board','wire'], drive:['wire','gear'] };
+export const ORDER_KEYS = ['gear','bolt','board','wire','rubber','battery','glass','lens','shell','keys','coil','tire','frame','chip','drive'];
+export const RAW = ['gear','bolt','board','blank','wire','sand','rubber','battery','plastic'];
+export const RAW_OF = {
+  glass:['sand'], lens:['sand'], shell:['blank'], keys:['plastic'], coil:['wire'], tire:['rubber'], frame:['blank','bolt'],
+  chip:['board','wire'], drive:['wire','gear'],
+};
 export const MACHINES = {
-  furnace:   { name:'Печь',    tag:'печь',    in:['sand'],          out:'glass', time:2.4, body:'#6b3b2e', broke:'Погасли печи' },
-  press:     { name:'Пресс',   tag:'пресс',   in:['blank'],         out:'shell', time:2.4, body:'#3b4c42', broke:'Сломались прессы' },
-  winder:    { name:'Намотка', tag:'намотка', in:['wire'],          out:'coil',  time:2.6, body:'#454b5e', broke:'Сломались намоточные станки' },
-  solder:    { name:'Пайка',   tag:'пайка',   in:['board','wire'],  out:'chip',  time:3.0, body:'#5a4a33', broke:'Сломались паяльные станции' },
-  assembler: { name:'Сборка',  tag:'сборка',  in:['coil','gear'],   out:'drive', time:3.0, body:'#36535c', broke:'Встали сборочные стенды' },
+  furnace:   { name:'Печь',         tag:'печь',         in:['sand'],          out:'glass', time:2.4, body:'#6b3b2e', broke:'Погасли печи' },
+  press:     { name:'Пресс',        tag:'пресс',        in:['blank'],         out:'shell', time:2.4, body:'#3b4c42', broke:'Сломались прессы' },
+  winder:    { name:'Намотка',      tag:'намотка',      in:['wire'],          out:'coil',  time:2.6, body:'#454b5e', broke:'Сломались намоточные станки' },
+  solder:    { name:'Пайка',        tag:'пайка',        in:['board','wire'],  out:'chip',  time:3.0, body:'#5a4a33', broke:'Сломались паяльные станции' },
+  assembler: { name:'Сборка',       tag:'сборка',       in:['coil','gear'],   out:'drive', time:3.0, body:'#36535c', broke:'Встали сборочные стенды' },
+  grinder:   { name:'Шлифовка',     tag:'шлифовка',     in:['glass'],         out:'lens',  time:2.4, body:'#4f5d66', broke:'Сломались шлифовальные станки' },
+  molder:    { name:'Литьё',        tag:'литьё',        in:['plastic'],       out:'keys',  time:2.4, body:'#3f5a4a', broke:'Встали литьевые машины' },
+  welder:    { name:'Сварка',       tag:'сварка',       in:['blank','bolt'],  out:'frame', time:3.0, body:'#4d4b58', broke:'Погасли сварочные посты' },
+  vulcanizer:{ name:'Вулканизатор', tag:'вулканизатор', in:['rubber'],        out:'tire',  time:2.6, body:'#4a3f3a', broke:'Остыли вулканизаторы' },
 };
 export const PRODUCTS = [
   { name:'Будильник',        need:{ gear:2, bolt:1 },                    tier:1 },
@@ -52,6 +65,19 @@ export const PRODUCTS = [
   { name:'Компьютер',        need:{ chip:2, glass:1, shell:1 },          tier:4 },
   { name:'Станок с ЧПУ',     need:{ chip:1, drive:2, shell:1 },          tier:4 },
   { name:'Электромобиль',    need:{ chip:1, drive:1, rubber:2 },         tier:4 },
+  // новые изделия — со второго раунда: первый раунд как раньше
+  { name:'Пульт',            need:{ keys:1, battery:1, bolt:1 },         tier:1, since:2 },
+  { name:'Ночник',           need:{ glass:1, battery:1 },                tier:1, since:2 },
+  { name:'Очки',             need:{ lens:2, bolt:1 },                    tier:2, since:2 },
+  { name:'Тачка',            need:{ frame:1, tire:1, bolt:1 },           tier:2, since:2 },
+  { name:'Тостер',           need:{ shell:1, coil:1, keys:1 },           tier:2, since:2 },
+  { name:'Велосипед',        need:{ frame:1, tire:2, gear:1 },           tier:3, since:2 },
+  { name:'Фотоаппарат',      need:{ lens:1, shell:1, chip:1 },           tier:3, since:2 },
+  { name:'Микроскоп',        need:{ lens:2, shell:1, bolt:1 },           tier:3, since:2 },
+  { name:'Игровая приставка',need:{ chip:1, keys:1, shell:1 },           tier:3, since:2 },
+  { name:'Мотоцикл',         need:{ frame:1, tire:2, drive:1 },          tier:4, since:2 },
+  { name:'Смартфон',         need:{ chip:1, lens:1, keys:1, battery:1 }, tier:4, since:2 },
+  { name:'Квадрокоптер',     need:{ frame:1, drive:2, chip:1 },          tier:4, since:2 },
 ];
 PRODUCTS.forEach(p => {
   let s = 0, n = 0;
@@ -73,8 +99,12 @@ export const UPGRADES = [
   { id:'kit',   name:'Ремкомплект',   desc:'чините вдвое быстрее', prices:[20] },
 ];
 
+// modes — в каких режимах бывает событие; без modes — во всех
 export const EVENTS = [
-  { id:'bonus',     title:'Премия ×2',        desc:'Изделия приносят вдвое больше очков', dur:14, short:'Премия ×2' },
+  { id:'bonus',     title:'Премия ×2',        desc:'Изделия приносят вдвое больше очков', dur:14, short:'Премия ×2', modes:['classic','brawl'] },
+  { id:'teamBonus', title:'Премия смене',     desc:'Отстающей смене — вдвое больше очков', dur:14, short:'Премия', modes:['teams'] },
+  { id:'guard',     title:'Пропускной режим', desc:'Двери соперников заперты — ходите только к своим', dur:12, short:'Двери заперты', modes:['teams'] },
+  { id:'hunt',      title:'Охота открыта',    desc:'За толчок передовика — вдвое больше очков', dur:12, short:'Охота ×2', modes:['brawl'] },
   { id:'reverse',   title:'Лента назад',      desc:'Конвейер пошёл в обратную сторону',   dur:11, short:'Лента назад' },
   { id:'supply',    title:'Большая поставка', desc:'На ленту сыплются детали',            dur:7,  short:'Поставка' },
   { id:'oil',       title:'Разлито масло',    desc:'На тёмных пятнах в цехе скользко',    dur:15, short:'Масло на полу' },
@@ -215,6 +245,63 @@ export function drawItem(d, type, x, y, s = 1, alpha = 1, shadow = false) {
       gearPath(d, 6, 0, 7.4, 5.4, 6);
       d.fillStyle = '#c6cdcf'; d.fill(); d.strokeStyle = '#545e64'; d.lineWidth = 1.2; d.stroke();
       dot(d, 6, 0, 2.2, '#4a5358');
+      break;
+    }
+    case 'battery': {
+      d.rotate(-0.35);
+      rr(d, -11, -6.5, 19, 13, 3); d.fillStyle = '#3a4048'; d.fill();
+      d.strokeStyle = '#15181c'; d.lineWidth = 1.3; d.stroke();
+      d.fillStyle = '#d9a441'; d.fillRect(1.5, -5.9, 5.8, 11.8);
+      rr(d, 8, -3, 3.5, 6, 1); d.fillStyle = '#c9ced1'; d.fill(); d.strokeStyle = '#545e64'; d.lineWidth = 1; d.stroke();
+      d.strokeStyle = '#5a3d0e'; d.lineWidth = 1.4; d.lineCap = 'round';
+      d.beginPath(); d.moveTo(2.6, 0); d.lineTo(6.2, 0); d.moveTo(4.4, -1.8); d.lineTo(4.4, 1.8); d.stroke();
+      d.fillStyle = 'rgba(255,255,255,.18)'; d.fillRect(-9.5, -5, 10, 2);
+      break;
+    }
+    case 'plastic': {
+      const beads = [[-7, 4], [-1, 5.5], [5, 4], [-4, -1], [2, -1], [8, -2.5], [-1, -6.5], [-9, -3]];
+      beads.forEach(([a, b], i) => {
+        dot(d, a, b, 3.7, ['#e8eef0', '#7fc4ea', '#f08a6c'][i % 3]);
+        d.strokeStyle = 'rgba(40,60,75,.55)'; d.lineWidth = 1; d.stroke();
+      });
+      break;
+    }
+    case 'lens': {
+      dot(d, 0, 0, 11, '#8d969c');
+      d.strokeStyle = '#4c555b'; d.lineWidth = 1.2; d.stroke();
+      const gr = d.createRadialGradient(-3, -3, 1, 0, 0, 9);
+      gr.addColorStop(0, '#f4fdff'); gr.addColorStop(1, 'rgba(150,210,225,.95)');
+      dot(d, 0, 0, 8.4, gr);
+      d.strokeStyle = 'rgba(255,255,255,.95)'; d.lineWidth = 1.6; d.lineCap = 'round';
+      d.beginPath(); d.arc(0, 0, 5.6, PI * 1.1, PI * 1.6); d.stroke();
+      break;
+    }
+    case 'tire': {
+      dot(d, 0, 0, 11.5, '#26282b');
+      d.strokeStyle = '#0d0e10'; d.lineWidth = 1.2; d.stroke();
+      d.strokeStyle = 'rgba(255,255,255,.22)'; d.lineWidth = 2;
+      for (let i = 0; i < 12; i++) {
+        const a = i / 12 * PI * 2;
+        d.beginPath(); d.moveTo(Math.cos(a) * 8.6, Math.sin(a) * 8.6); d.lineTo(Math.cos(a) * 11, Math.sin(a) * 11); d.stroke();
+      }
+      dot(d, 0, 0, 5.4, '#a9b1b5');
+      d.strokeStyle = '#545e64'; d.lineWidth = 1.1; d.stroke();
+      dot(d, 0, 0, 2, '#4a5358');
+      break;
+    }
+    case 'frame': {
+      d.lineCap = 'round';
+      const bars = () => { d.beginPath(); d.moveTo(-11, 8); d.lineTo(10, 8); d.lineTo(1, -9); d.closePath(); d.moveTo(-5, 0); d.lineTo(6, 1.5); };
+      bars(); d.strokeStyle = '#3b4146'; d.lineWidth = 5.5; d.stroke();
+      bars(); d.strokeStyle = '#9aa4aa'; d.lineWidth = 3.2; d.stroke();
+      for (const [a, b] of [[-11, 8], [10, 8], [1, -9]]) dot(d, a, b, 2.6, '#c7a54b');   // сварные швы
+      break;
+    }
+    case 'keys': {
+      rr(d, -11.5, -9.5, 23, 19, 3.5); d.fillStyle = '#ded9cc'; d.fill();
+      d.strokeStyle = '#8a8577'; d.lineWidth = 1.3; d.stroke();
+      const cols = ['#5d666b', '#5d666b', '#d1553f', '#5d666b', '#4caf6a', '#5d666b'];
+      for (let i = 0; i < 6; i++) { rr(d, -8 + (i % 3) * 5.8, -6 + Math.floor(i / 3) * 6.6, 4.4, 4.8, 1.2); d.fillStyle = cols[i]; d.fill(); }
       break;
     }
   }

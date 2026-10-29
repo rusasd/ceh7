@@ -13,6 +13,7 @@ const g = canvas.getContext('2d');
 const hashArgs = new URLSearchParams(location.hash.slice(1));
 const DEBUG = hashArgs.has('debug');
 const LAG = Math.max(0, +hashArgs.get('lag') || 0);   // искусственная задержка отправки, мс — для проверки
+const CALM = hashArgs.has('calm');   // для проверки: события и срочные заказы — только по команде
 
 const FLOOR = 0, WALL = 1, BELT = 2, ISLAND = 3, BENCH = 4, MACH = 5, DOOR = 6;
 const R = 15, SPEED = 160, RUSH_AT = 20, GUARD = 1.2, SEND_EVERY = 1 / 15, SEATS = 4;
@@ -91,6 +92,10 @@ const LAYOUT = [
   { type:'assembler', rect:{ x:0,   y:7*T, w:T, h:T   }, rot:-PI/2 },
   { type:'winder',    rect:{ x:8*T, y:2*T, w:T, h:2*T }, rot: PI/2 },
   { type:'solder',    rect:{ x:8*T, y:5*T, w:T, h:2*T }, rot: PI/2 },
+  { type:'grinder',   rect:{ x:0,   y:1*T, w:T, h:T   }, rot:-PI/2 },   // рядом с печью: стекло сразу на шлифовку
+  { type:'welder',    rect:{ x:0,   y:9*T, w:T, h:T   }, rot:-PI/2 },
+  { type:'molder',    rect:{ x:8*T, y:1*T, w:T, h:T   }, rot: PI/2 },
+  { type:'vulcanizer',rect:{ x:8*T, y:8*T, w:T, h:T   }, rot: PI/2 },
 ];
 for (const m of LAYOUT) {
   for (let r = m.rect.y / T; r < (m.rect.y + m.rect.h) / T; r++)
@@ -107,9 +112,11 @@ function solidAt(scene, c, r) {
   if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return true;
   const v = (scene === 'hall' ? hallGrid : workGrid)[r][c];
   if (v === FLOOR) return false;
-  if (v === DOOR) return scene === 'hall' && !matchSeats.includes(doorAt(c, r));
+  if (v === DOOR) return scene === 'hall' && !doorOpen(doorAt(c, r));
   return true;
 }
+// дверь из цеха открыта, если её хозяин в матче; в «Пропускной режим» к соперникам не пускают
+const doorOpen = s => matchSeats.includes(s) && !(evt && evt.id === 'guard' && rivals(mySeat, s));
 const machFront = (m, d) => ({ x: m.rect.x + m.rect.w / 2 - Math.sin(m.rot) * d, y: m.rect.y + m.rect.h / 2 + Math.cos(m.rot) * d });
 
 // ---------- состояние ----------
@@ -135,6 +142,9 @@ let spawnT = 0, spawnSide = 0, nextEvtAt = 18, lastEvtId = '', clockT = 0, final
 const pending = new Map();       // детали из цеха, взятые до ответа создателя
 const pendingW = new Map();      // что утащили в чужой мастерской до ответа её хозяина
 let idSeq = 0, ridSeq = 0, sendT = 0, pressT = 0, lastSent = '', lastSentAt = -9, wsDirty = false, wsT = 0;
+let mode = 'classic';            // режим матча: classic, teams, brawl — выбирает создатель комнаты
+// срочный заказ (ведёт создатель) и наша сдача, пока создатель не ответил
+let urgent = null, urgentAt = 0, urgentSeq = 0, pendingD = null;
 
 function newWallet() { return { coins: 0, up: Object.fromEntries(UPGRADES.map(u => [u.id, 0])) }; }
 function newTally() { return { total: [0, 0, 0, 0], wins: [0, 0, 0, 0], done: [0, 0, 0, 0] }; }
@@ -156,6 +166,39 @@ const ownerOf = sc => sc && sc[0] === 'w' ? +sc.slice(1) : -1;
 const inOwnWork = () => me.scene === 'w' + mySeat;
 const sceneMachines = sc => ownerOf(sc) === mySeat ? machines : mirrors[ownerOf(sc)].m;
 const sceneFloor = sc => ownerOf(sc) === mySeat ? workFloor : mirrors[ownerOf(sc)].f;
+
+// ---------- режимы ----------
+const MODES = {
+  classic: { name: 'Классика', desc: 'Каждый сам за себя: лента, станки и набеги на чужие мастерские.' },
+  teams: { name: 'Команды', desc: 'Дневная смена (оранжевый и зелёный) против ночной (синий и фиолетовый). Напарники работают на станках и верстаке друг друга, своих толкать нельзя. Втроём одиночке очки ×2. В цехе бывают срочные заказы.' },
+  brawl: { name: 'Схватка', desc: 'Каждый сам за себя. Лидер раунда ходит в каске: кто толкнёт лидера, заберёт 10 очков. В цехе срочные заказы: кто первым принёс деталь к окну приёмки, тот и получил премию.' },
+};
+const TEAMS = [
+  { name: 'Дневная смена', short: 'дневная', gen: 'дневной смены', dat: 'дневной смене', ins: 'дневной сменой' },
+  { name: 'Ночная смена', short: 'ночная', gen: 'ночной смены', dat: 'ночной смене', ins: 'ночной сменой' },
+];
+const BOUNTY = 10;
+const teamsOn = () => mode === 'teams';
+const teamOf = s => s % 2;   // места 0 и 2 — двери внизу, 1 и 3 — вверху: у каждой смены своя сторона цеха
+const isMate = s => teamsOn() && s >= 0 && s !== mySeat && teamOf(s) === teamOf(mySeat);
+const rivals = (a, b) => !teamsOn() || teamOf(a) !== teamOf(b);
+const teamSeats = t => matchSeats.filter(s => teamOf(s) === t);
+// втроём в командах одиночке очки удваиваются
+const soloMult = () => teamsOn() && matchSeats.length === 3 && teamSeats(teamOf(mySeat)).length === 1 ? 2 : 1;
+const urgentOn = () => mode !== 'classic';
+const roundScore = s => s === mySeat ? score : peers[s] ? peers[s].score : 0;
+// передовик «Схватки» — у кого больше всех очков за раунд; при равенстве каски нет ни у кого
+function leaderSeat() {
+  if (mode !== 'brawl' || !inMatch()) return -1;
+  let best = -1, top = 0, tie = false;
+  for (const s of matchSeats) {
+    const v = roundScore(s);
+    if (v > top) { top = v; best = s; tie = false; } else if (v === top && v > 0) tie = true;
+  }
+  return tie ? -1 : best;
+}
+// премия ×2 к заказам у этого места: общая или своей смене
+const bonusFor = s => !!evt && (evt.id === 'bonus' || (evt.id === 'teamBonus' && teamOf(s) === evt.team));
 
 // ---------- игроки ----------
 function makePlayer() {
@@ -181,6 +224,8 @@ function tiersFor(r, n) {
   if (r >= n) return n <= 3 ? [2, 3, 4] : [3, 4];
   return [[1, 2], [1, 2, 3], [2, 3], [2, 3, 4]][Math.min(r - 1, 3)];
 }
+// изделия раунда: по уровням сложности, новые — со второго раунда
+const productsFor = (r, tiers) => PRODUCTS.filter(p => tiers.includes(p.tier) && (p.since || 1) <= r);
 function getOrder(n) {
   const allowed = tiersFor(round, rounds);
   while (orderSeq.length <= n) {
@@ -188,10 +233,18 @@ function getOrder(n) {
     let tiers = allowed;
     if (k < 2 && allowed.length > 1) tiers = allowed.slice(0, -1);
     const prev = orderSeq[k - 1];
-    const pool = PRODUCTS.filter(p => tiers.includes(p.tier) && p !== prev);
+    const pool = productsFor(round, tiers).filter(p => p !== prev);
     orderSeq.push(pool[Math.floor(orderRng() * pool.length)]);
   }
   return orderSeq[n];
+}
+// что пригодится в этом раунде: сырьё для ленты и детали со станков — для поломок и срочных заказов
+let roundRaw = RAW, roundMade = [];
+function roundParts() {
+  const used = new Set();
+  for (const p of productsFor(round, tiersFor(round, rounds))) for (const k in p.need) used.add(k);
+  roundRaw = RAW.filter(t => [...used].some(k => (RAW_OF[k] || [k]).includes(t)));
+  roundMade = [...used].filter(k => RAW_OF[k]);
 }
 function newOrder() { order = { prod: getOrder(done), have: zeroCounts() }; wsDirty = true; renderHud(); sendScore(); }
 const needs = type => !!order && (order.prod.need[type] || 0) > order.have[type];
@@ -503,14 +556,15 @@ function checkDoors() {
   let s = -1;
   if (me.y > (ROWS - 0.45) * T) s = doorAt(Math.floor(me.x / T), ROWS - 1);
   else if (me.y < 0.45 * T) s = doorAt(Math.floor(me.x / T), 0);
-  if (s >= 0 && matchSeats.includes(s)) enterScene('w' + s, s);
+  if (s >= 0 && doorOpen(s)) enterScene('w' + s, s);
 }
 // s — чья дверь: в цехе появляемся у неё, из неё попадаем в мастерскую этого места
 function enterScene(scene, s) {
   if (scene === 'hall') toHallDoor(me, s); else toWorkDoor(me, s);
   me.target = null; sparks = []; texts = []; fade = 1;
   sfx.door();
-  if (scene !== 'hall' && s !== mySeat) showBanner(`Мастерская: ${SEAT[s].name}`, 'Можно утащить детали с пола и готовое из станков', colorOf(s));
+  if (scene !== 'hall' && isMate(s)) showBanner('Мастерская напарника', 'Станки и верстак здесь общие для вашей смены', colorOf(s));
+  else if (scene !== 'hall' && s !== mySeat) showBanner(`Мастерская: ${SEAT[s].name}`, 'Можно утащить детали с пола и готовое из станков', colorOf(s));
   sendState(true);
 }
 // других двигаем плавно к последней присланной точке
@@ -555,23 +609,34 @@ function findTarget(p) {
       const cs = pathClosest(ix, iy);
       take(cs.d, 30, { kind:'beltPut', s:cs.s, x:cs.x, y:cs.y }, 14);
     }
-  } else if (o === mySeat) {
-    for (const m of machines) {
-      const d = rectDist(ix, iy, m.rect);
-      if (d > 24 * reach) continue;
-      if (m.broken > 0) { take(d, 24, { kind:'repair', m }); continue; }
-      if (m.state === 'ready') { if (room) take(d, 24, { kind:'mTake', m }); else take(d, 24, { kind:'mBusy', m }, 10); continue; }
-      if (m.state === 'work') { if (holding) take(d, 24, { kind:'mBusy', m }, 10); continue; }
-      if (loadableFor(p, m).length) take(d, 24, { kind:'mLoad', m });
-      else if (m.inputs.length && room) take(d, 24, { kind:'mUnload', m }, 4);
-      else if (holding) take(d, 24, { kind:'mNo', m }, 10);
+    // окна приёмки срочных заказов — посреди верхней и нижней стены
+    if (holding && urgent && urgent.by < 0) {
+      for (const w of WINDOWS) {
+        const d = rectDist(ix, iy, w);
+        if (p.hands.includes(urgent.type) && !pendingD) take(d, 24, { kind:'deliver', w });
+        else take(d, 24, { kind:'deliverNo', w }, 10);
+      }
     }
-    if (room) for (const it of workFloor) take(Math.hypot(it.x - ix, it.y - iy), 30, { kind:'wfloor', it, x:it.x, y:it.y }, 6);
+  } else if (o === mySeat || isMate(o)) {
+    // своя мастерская или напарника: в командах станки и верстак общие на смену
+    const own = o === mySeat, mir = mirrors[o];
+    const need = own ? needs : t => mateNeeds(mir, t);
+    (own ? machines : mir.m).forEach((m, i) => {
+      const d = rectDist(ix, iy, m.rect);
+      if (d > 24 * reach) return;
+      if (m.broken > 0) { take(d, 24, { kind:'repair', m, i, o }); return; }
+      if (m.state === 'ready') { if (room) take(d, 24, { kind:'mTake', m, i, o }); else take(d, 24, { kind:'mBusy', m }, 10); return; }
+      if (m.state === 'work') { if (holding) take(d, 24, { kind:'mBusy', m }, 10); return; }
+      if (loadableFor(p, m).length) take(d, 24, { kind:'mLoad', m, i, o });
+      else if (m.inputs.length && room) take(d, 24, { kind:'mUnload', m, i, o }, 4);
+      else if (holding) take(d, 24, { kind:'mNo', m }, 10);
+    });
+    if (room) for (const it of own ? workFloor : mir.f) take(Math.hypot(it.x - ix, it.y - iy), 30, { kind:'wfloor', it, o, x:it.x, y:it.y }, 6);
     if (holding) {
       const d = rectDist(ix, iy, bench.rect);
       if (d <= 24 * reach) {
-        if (bench.doneT > 0) take(d, 24, { kind:'benchBusy', b: bench }, 10);
-        else if (p.hands.some(needs)) take(d, 24, { kind:'bench', b: bench });
+        if ((own ? bench.doneT : mir.bd) > 0) take(d, 24, { kind:'benchBusy', b: bench }, 10);
+        else if (p.hands.some(need)) take(d, 24, { kind:'bench', b: bench, o });
         else take(d, 24, { kind:'benchNo', b: bench }, 10);
       }
     }
@@ -590,12 +655,17 @@ function findTarget(p) {
   }
   if (p.shoveCd <= 0) {
     for (const q of scenePlayers()) {
-      if (q === me || q.guard > 0 || q.stun > 0) continue;
+      if (q === me || q.guard > 0 || q.stun > 0 || !rivals(mySeat, q.seat)) continue;   // своих не толкаем
       take(Math.hypot(q.x - ix, q.y - iy) - 10, 24, { kind:'shove', q }, 4);
     }
   }
   if (!best && holding) best = { kind:'drop' };
   return best;
+}
+// чего ещё не хватает в заказе напарника — по его копии
+function mateNeeds(mir, type) {
+  const ord = mir.ord;
+  return !!ord && ord.sl.filter(k => k === type).length > (+ord.h[type] || 0);
 }
 // деталь из цеха: создатель берёт сразу, остальные — сразу у себя, но создатель может ответить «не успели»
 function takeShared(it, list) {
@@ -605,13 +675,23 @@ function takeShared(it, list) {
   if (role === 'host') net.send({ t: 'gone', id: it.id, by: mySeat });
   else { pending.set(it.id, it.type); net.send({ t: 'take', id: it.id }); }
 }
-// утащить в чужой мастерской: сразу в руки, но её хозяин может ответить «не успели»
-function steal(o, kind, extra, type) {
+// действие в чужой мастерской — решает её хозяин. got — что сразу берём в руки (можно не успеть),
+// give — что сразу отдаём из рук (загрузить станок или положить на верстак напарника)
+function askOwner(o, kind, extra, got, give) {
   const rid = mySeat + 'r' + (++ridSeq).toString(36);
-  pendingW.set(rid, { o, kind, ...extra, type, at: clock });
-  me.hands.push(type);
-  sfx.pick();
+  pendingW.set(rid, { o, kind, ...extra, got, give, at: clock });
+  if (got) { me.hands.push(got); sfx.pick(); }
+  for (const t of give || []) { const k = me.hands.lastIndexOf(t); if (k >= 0) me.hands.splice(k, 1); }
   net.send({ t: 'wtake', o, kind, rid, ...extra });
+}
+// хозяин отказал: взятое возвращаем, отданное получаем обратно
+function undoAsk(p, back) {
+  if (p.got) {
+    const k = me.hands.lastIndexOf(p.got);
+    if (k >= 0) { me.hands.splice(k, 1); say('Не успели!'); }
+  }
+  for (const t of back || []) me.hands.push(t);
+  sendState(true);
 }
 function dropItem(type, x, y) {
   x = r1(x); y = r1(y);
@@ -637,7 +717,7 @@ function doShove(q) {
   net.send({ t: 'shove', to: pidOf(q.seat), x: r1(me.x), y: r1(me.y), sc: me.scene, force });
 }
 // меня толкнули: устойчивость и защита после оглушения считаются у меня
-function getShoved(dx, dy, force) {
+function getShoved(dx, dy, force, by) {
   if (me.guard > 0) return;
   const arm = up().armor;
   force *= arm ? 0.7 : 1;
@@ -646,9 +726,53 @@ function getShoved(dx, dy, force) {
   me.guard = me.stun + GUARD;
   if (arm < 2) while (me.hands.length) dropItem(me.hands.pop(), me.x + (Math.random() - .5) * 16, me.y + (Math.random() - .5) * 16);
   addText(me.x, over(me), 'Ой!', C.ink, 0.9);
+  // «Схватка»: толкнувший передовика забирает его очки
+  if (by >= 0 && by !== mySeat && leaderSeat() === mySeat) {
+    const pts = Math.min(score, BOUNTY * (evt && evt.id === 'hunt' ? 2 : 1));
+    score -= pts;
+    net.send({ t: 'bounty', to: pidOf(by), pts });
+    addText(me.x, over(me, 54), `−${pts}`, C.alarm, 1.3, true);
+    renderHud(); sendScore();
+  }
   burst(me.x, me.y, 10, ['#d8d2c0', '#a9a291'], 130, .4, 3);
   sfx.shove(); buzz(50);
   sendState(true);
+}
+function onBounty(pts) {
+  if (state !== 'play') return;
+  pts = Math.max(0, Math.min(4 * BOUNTY, Math.round(+pts || 0)));
+  if (!pts) return;
+  score += pts;
+  addText(me.x, over(me, 40), `+${pts} за передовика`, myColor(), 1.4, true);
+  sfx.coin(); buzz(30);
+  renderHud(); sendScore();
+}
+// детали на мой верстак — свои или от напарника; заказ собран — очки мне. Возвращает то, что не подошло
+function benchPut(types, col) {
+  const ord = order, back = [];
+  if (!ord || bench.doneT > 0) return types.slice();
+  let put = 0;
+  for (const h of types) { if (needs(h)) { ord.have[h]++; put++; } else back.push(h); }
+  if (!put) return back;
+  const b = bench, here = inOwnWork();
+  const cx = b.rect.x + b.rect.w / 2, cy = b.rect.y + b.rect.h / 2;
+  if (here) sfx.place();
+  const placed = ORDER_KEYS.reduce((s, k) => s + ord.have[k], 0);
+  if (placed >= ord.prod.slots.length) {
+    const mult = (bonusFor(mySeat) ? 2 : 1) * soloMult();
+    const val = Math.round(ord.prod.value * mult * (1 + 0.15 * up().bonus));
+    score += val; done++;
+    b.doneT = 1.0;
+    if (here) {
+      addText(cx, b.rect.y - 24, mult > 1 ? `+${val} ×${mult}` : `+${val}`, col, 1.4, true);
+      addText(cx, b.rect.y - 52, ord.prod.name, C.ink, 1.4);
+      burst(cx, cy, 26, [col, C.hazard, '#ffffff'], 200, .9, 3.5);
+    }
+    sfx.done(); buzz(35);
+  } else if (here) burst(cx, cy, 8, [col], 90, .4, 2.5);
+  wsDirty = true;
+  renderHud(); sendScore();
+  return back;
 }
 function doAction() {
   const p = me;
@@ -659,16 +783,29 @@ function doAction() {
   switch (t.kind) {
     case 'belt': takeShared(t.it, belt); break;
     case 'floor': takeShared(t.it, hallFloor); break;
+    // в мастерской напарника всё то же, но решает её хозяин: копию меняем сразу, он подтвердит
     case 'wfloor':
+      if (t.o !== mySeat) { const f = mirrors[t.o].f; f.splice(f.indexOf(t.it), 1); askOwner(t.o, 'floor', { id: t.it.id }, t.it.type); break; }
       workFloor.splice(workFloor.indexOf(t.it), 1); p.hands.push(t.it.type); sfx.pick(); wsDirty = true; break;
     case 'mTake': {
       const m = t.m;
+      if (t.o !== mySeat) { m.state = 'idle'; m.t = 0; askOwner(t.o, 'mTake', { i: t.i }, MACHINES[m.type].out); break; }
       p.hands.push(MACHINES[m.type].out); m.state = 'idle'; m.t = 0; sfx.pick(); wsDirty = true; break;
     }
     case 'mUnload':
+      if (t.o !== mySeat) { const type = t.m.inputs.pop(); askOwner(t.o, 'mUnload', { i: t.i, type }, type); break; }
       p.hands.push(t.m.inputs.pop()); sfx.pick(); wsDirty = true; break;
     case 'mLoad': {
       const m = t.m, def = MACHINES[m.type];
+      if (t.o !== mySeat) {
+        const types = [];
+        for (const h of loadableFor(p, m)) { if (m.inputs.length + types.length >= def.in.length) break; types.push(h); }
+        m.inputs.push(...types);
+        if (m.inputs.length >= def.in.length) { m.state = 'work'; m.t = 0; m.inputs = []; m.dur = def.time; }
+        askOwner(t.o, 'load', { i: t.i, types }, null, types);
+        sfx.place();
+        break;
+      }
       for (const h of loadableFor(p, m)) {
         if (m.inputs.length >= def.in.length) break;
         m.inputs.push(h); p.hands.splice(p.hands.lastIndexOf(h), 1);
@@ -689,43 +826,39 @@ function doAction() {
     }
     case 'mBusy': say(t.m.state === 'ready' ? 'Руки заняты' : 'Станок работает'); break;
     case 'repair': {
-      const m = t.m, fp = machFront(m, 18);
-      m.broken = Math.max(0, m.broken - (up().kit ? 2 : 1)); sfx.clank();
+      const m = t.m, fp = machFront(m, 18), n = up().kit ? 2 : 1;
+      m.broken = Math.max(0, m.broken - n); sfx.clank();
       burst(fp.x, fp.y, 6, ['#ffd27a', '#ffffff'], 120, .35, 2.5);
       if (m.broken === 0) { sfx.fixed(); addText(fp.x, over(p, 36), 'Починено!', '#7be39a', 1.2); }
-      wsDirty = true;
+      if (t.o === mySeat) wsDirty = true; else askOwner(t.o, 'fix', { i: t.i, n });
       break;
     }
     case 'benchNo': say('В заказе этого нет'); break;
     case 'benchBusy': break;
     case 'bench': {
-      const b = t.b, ord = order;
-      for (let i = p.hands.length - 1; i >= 0; i--) {
-        const h = p.hands[i];
-        if (needs(h)) { ord.have[h]++; p.hands.splice(i, 1); }
-      }
+      if (t.o === mySeat) { p.hands = benchPut(p.hands.slice(), col); break; }
+      // на верстак напарника: отдаём то, чего не хватает в его заказе
+      const ord = mirrors[t.o].ord, have = { ...ord.h }, give = [];
+      for (const h of p.hands) if (ord.sl.filter(k => k === h).length > (+have[h] || 0)) { give.push(h); have[h] = (+have[h] || 0) + 1; }
+      ord.h = have;
+      askOwner(t.o, 'bench', { types: give }, null, give);
       sfx.place();
-      const placed = ORDER_KEYS.reduce((s, k) => s + ord.have[k], 0);
-      const cx = b.rect.x + b.rect.w / 2, cy = b.rect.y + b.rect.h / 2;
-      if (placed >= ord.prod.slots.length) {
-        const mult = evt && evt.id === 'bonus' ? 2 : 1;
-        const val = Math.round(ord.prod.value * mult * (1 + 0.15 * up().bonus));
-        score += val; done++;
-        b.doneT = 1.0;
-        addText(cx, b.rect.y - 24, mult > 1 ? `+${val} ×2` : `+${val}`, col, 1.4, true);
-        addText(cx, b.rect.y - 52, ord.prod.name, C.ink, 1.4);
-        burst(cx, cy, 26, [col, C.hazard, '#ffffff'], 200, .9, 3.5);
-        sfx.done(); buzz(35);
-      } else {
-        burst(cx, cy, 8, [col], 90, .4, 2.5);
-      }
-      wsDirty = true;
-      renderHud(); sendScore();
+      burst(t.b.rect.x + t.b.rect.w / 2, t.b.rect.y + t.b.rect.h / 2, 8, [col], 90, .4, 2.5);
       break;
     }
-    case 'vTake': t.m.state = 'idle'; t.m.t = 0; steal(o, 'mTake', { i: t.i }, MACHINES[t.m.type].out); break;
-    case 'vUnload': { const type = t.m.inputs.pop(); steal(o, 'mUnload', { i: t.i, type }, type); break; }
-    case 'vFloor': { const f = mirrors[o].f; f.splice(f.indexOf(t.it), 1); steal(o, 'floor', { id: t.it.id }, t.it.type); break; }
+    case 'deliver': {
+      const type = urgent.type, rid = mySeat + 'd' + (++ridSeq).toString(36);
+      p.hands.splice(p.hands.lastIndexOf(type), 1);
+      pendingD = { rid, type, at: clock };
+      sfx.place();
+      const m = { id: urgent.id, rid, type };
+      if (role === 'host') hostDeliver(m, mySeat, myPid); else net.send({ t: 'deliver', ...m });
+      break;
+    }
+    case 'deliverNo': say(pendingD ? 'Ждём ответа приёмки' : `Окно ждёт: ${PARTS[urgent.type].name.toLowerCase()}`); break;
+    case 'vTake': t.m.state = 'idle'; t.m.t = 0; askOwner(o, 'mTake', { i: t.i }, MACHINES[t.m.type].out); break;
+    case 'vUnload': { const type = t.m.inputs.pop(); askOwner(o, 'mUnload', { i: t.i, type }, type); break; }
+    case 'vFloor': { const f = mirrors[o].f; f.splice(f.indexOf(t.it), 1); askOwner(o, 'floor', { id: t.it.id }, t.it.type); break; }
     case 'vNo': say(t.m.broken ? 'Станок сломан' : 'Это чужой станок'); break;
     case 'vBench': say('Это чужой верстак'); break;
     case 'beltPut':
@@ -777,13 +910,13 @@ function pickSpawnType() {
   hallFloor.forEach(i => add(i.type));
   const w = {};
   let sum = 0;
-  for (const t of RAW) {
+  for (const t of roundRaw) {
     let v = 1 + mine[t] - hall[t] * 1.2;
     for (const s of others()) if (peers[s] && isOn(s)) v += +peers[s].w[t] || 0;
     w[t] = Math.max(0.45, v); sum += w[t];
   }
   let r = Math.random() * sum;
-  for (const t of RAW) { r -= w[t]; if (r <= 0) return t; }
+  for (const t of roundRaw) { r -= w[t]; if (r <= 0) return t; }
   return 'gear';
 }
 function trySpawn() {
@@ -817,11 +950,12 @@ function makePuddles() {
     puddles.push({ x: W - x, y: H - y, r: rad, a: 0, seed: Math.random() * 10 });
   }
 }
-function applyEvent(id, t = 0) {
+function applyEvent(id, t = 0, team = 0) {
   const e = EVENTS.find(x => x.id === id);
   if (!e || e.id === 'breakdown') return;
-  evt = { ...e, t };
-  if (t === 0) { sfx.alert(); buzz(60); showBanner(e.title, e.desc); }
+  evt = { ...e, t, team: team === 1 ? 1 : 0 };
+  if (e.id === 'teamBonus') evt.title = evt.short = `Премия ${TEAMS[evt.team].dat}`;
+  if (t === 0) { sfx.alert(); buzz(60); showBanner(evt.title, evt.desc); }
 }
 function applyBreakdown(type) {
   if (!MACHINES[type]) return;
@@ -836,27 +970,88 @@ function onRush() {
 }
 function startEvent(forceId) {
   const anyBroken = machines.some(m => m.broken > 0);
-  const pool = EVENTS.filter(e => e.id !== lastEvtId && !(e.id === 'breakdown' && anyBroken));
+  const pool = EVENTS.filter(e => (!e.modes || e.modes.includes(mode)) && e.id !== lastEvtId && !(e.id === 'breakdown' && anyBroken));
   const e = EVENTS.find(x => x.id === forceId) || pool[Math.floor(Math.random() * pool.length)];
   lastEvtId = e.id;
   if (e.id === 'breakdown') {
-    const types = Object.keys(MACHINES);
+    // ломаются станки, которые нужны в этом раунде
+    let types = Object.keys(MACHINES).filter(k => roundMade.includes(MACHINES[k].out));
+    if (!types.length) types = Object.keys(MACHINES);
     const type = types[Math.floor(Math.random() * types.length)];
     net.send({ t: 'brk', type });
     applyBreakdown(type);
     nextEvtAt = elapsed + 16 + Math.random() * 8;
     return;
   }
+  let team = 0;
+  if (e.id === 'teamBonus') {   // премия той смене, что отстаёт
+    const ts = [0, 0];
+    for (const s of matchSeats) ts[teamOf(s)] += roundScore(s);
+    team = ts[0] === ts[1] ? (Math.random() < 0.5 ? 0 : 1) : ts[0] < ts[1] ? 0 : 1;
+  }
   if (e.id === 'oil') { makePuddles(); net.send({ t: 'oil', list: puddles.map(packPuddle) }); }
-  net.send({ t: 'evt', id: e.id });
-  applyEvent(e.id);
+  net.send({ t: 'evt', id: e.id, team });
+  applyEvent(e.id, 0, team);
 }
 function hostEvents() {
   if (evt) {
     if (evt.t >= evt.dur) { evt = null; net.send({ t: 'evtEnd' }); nextEvtAt = elapsed + 16 + Math.random() * 8; }
-  } else if (elapsed >= nextEvtAt && timeLeft > RUSH_AT + 16) {
+  } else if (!CALM && elapsed >= nextEvtAt && timeLeft > RUSH_AT + 16) {
     startEvent();
   }
+}
+
+// ---------- срочные заказы: окна приёмки в цехе, кто первым принёс деталь — тому премия ----------
+const WINDOWS = [{ x: 3 * T, y: (ROWS - 1) * T, w: 3 * T, h: T }, { x: 3 * T, y: 0, w: 3 * T, h: T }];
+const URGENT_DUR = 25;
+const nextUrgentIn = () => mode === 'brawl' ? 16 + Math.random() * 8 : 26 + Math.random() * 10;
+function hostUrgent() {
+  if (!urgentOn()) return;
+  if (urgent) { if (urgent.t >= urgent.dur) endUrgent(-1, ''); return; }
+  if (!CALM && elapsed >= urgentAt && timeLeft > 15 && roundMade.length) startUrgent();
+}
+function startUrgent(forceType) {
+  const type = roundMade.includes(forceType) ? forceType : roundMade[Math.floor(Math.random() * roundMade.length)];
+  const m = { t: 'urgent', id: ++urgentSeq, type, pts: 2 * PARTS[type].val + 20, dur: URGENT_DUR };
+  net.send(m);
+  applyUrgent(m);
+}
+function applyUrgent(m, t = 0) {
+  urgent = { id: +m.id || 0, type: partOr(m.type), pts: Math.max(0, +m.pts || 0), t, dur: +m.dur || URGENT_DUR, by: -1 };
+  if (t === 0) { sfx.alert(); buzz(60); showBanner('Срочный заказ!', `${PARTS[urgent.type].name} к окну приёмки — +${urgent.pts} первому`); }
+}
+function endUrgent(by, rid) {
+  const m = { t: 'urgentEnd', id: urgent.id, by, rid };
+  net.send(m);
+  applyUrgentEnd(m);
+  urgentAt = elapsed + nextUrgentIn();
+}
+// сдать может кто угодно, засчитывает создатель: кто раньше дошёл до него
+function hostDeliver(m, s, from) {
+  if (state === 'play' && urgent && urgent.by < 0 && +m.id === urgent.id && m.type === urgent.type && s >= 0) endUrgent(s, String(m.rid));
+  else if (from === myPid) onDeliverDenied(String(m.rid));
+  else net.send({ t: 'dres', to: from, rid: m.rid });
+}
+function applyUrgentEnd(m) {
+  if (!urgent || +m.id !== urgent.id) return;
+  const u = urgent, by = +m.by;
+  urgent = null;
+  if (by === mySeat && pendingD && pendingD.rid === m.rid) {
+    const pts = Math.round(u.pts * soloMult() * (1 + 0.15 * up().bonus));
+    score += pts; pendingD = null;
+    addText(me.x, over(me, 40), `+${pts}`, myColor(), 1.4, true);
+    showBanner('Срочный заказ ваш!', `Вы успели раньше всех — +${pts}`, myColor());
+    sfx.done(); buzz(40);
+    renderHud(); sendScore();
+  } else if (by >= 0 && by !== mySeat) {
+    showBanner('Срочный заказ закрыт', `Премия у ${SEAT[by].gen}${teamsOn() ? ` · ${TEAMS[teamOf(by)].short} смена` : ''}`, colorOf(by));
+  } else if (by < 0) showBanner('Срочный заказ сорвался', 'Никто не успел принести деталь', C.alarm);
+}
+function onDeliverDenied(rid) {
+  if (!pendingD || pendingD.rid !== rid) return;
+  me.hands.push(pendingD.type); pendingD = null;
+  say('Не успели!');
+  sendState(true);
 }
 const packItem = it => ({ id: it.id, type: it.type, off: r1(it.off) });
 const packFloor = it => ({ id: it.id, type: it.type, x: r1(it.x), y: r1(it.y), age: r1(it.age) });
@@ -899,13 +1094,15 @@ function applyWs(o, m) {
   }
 }
 // ко мне в мастерскую пришли утащить деталь
+// ко мне в мастерскую пришли: соперник утащить деталь, напарник — ещё и поработать на станках и верстаке
 function onWTake(m, from) {
-  let ok = false, spot = null;
+  const mate = isMate(seatOf(from)), types = Array.isArray(m.types) ? m.types.filter(t => t in PARTS) : [];
+  const mc = machines[m.i];
+  let ok = false, spot = null, back;
   if (m.kind === 'floor') {
     const k = workFloor.findIndex(i => i.id === m.id);
     if (k >= 0) { spot = workFloor[k]; workFloor.splice(k, 1); ok = true; }
   } else if (m.kind === 'mTake' || m.kind === 'mUnload') {
-    const mc = machines[m.i];
     if (mc && !mc.broken) {
       if (m.kind === 'mTake' && mc.state === 'ready') { mc.state = 'idle'; mc.t = 0; ok = true; }
       else if (m.kind === 'mUnload' && mc.state === 'idle') {
@@ -914,20 +1111,30 @@ function onWTake(m, from) {
       }
       if (ok) spot = machFront(mc, 20);
     }
+  } else if (mate && m.kind === 'load') {
+    const def = mc && MACHINES[mc.type];
+    const want = def ? def.in.filter(t => !mc.inputs.includes(t)) : [];
+    if (mc && !mc.broken && mc.state === 'idle' && types.length && new Set(types).size === types.length && types.every(t => want.includes(t))) {
+      mc.inputs.push(...types);
+      if (mc.inputs.length >= def.in.length) { mc.state = 'work'; mc.t = 0; mc.inputs = []; mc.dur = def.time * (1 - 0.25 * up().tune); }
+      ok = true;
+    }
+  } else if (mate && m.kind === 'bench') {
+    back = benchPut(types, colorOf(seatOf(from)));
+    ok = true;
+  } else if (mate && m.kind === 'fix') {
+    if (mc && mc.broken > 0) { mc.broken = Math.max(0, mc.broken - Math.min(2, Math.max(1, +m.n || 1))); ok = true; }
   }
-  net.send({ t: 'wres', to: from, rid: m.rid, ok });
+  net.send({ t: 'wres', to: from, rid: m.rid, ok, back });
   wsDirty = true;   // при отказе тоже: гость поправит свою копию
-  if (ok) { sfx.thief(); if (inOwnWork() && spot) addText(spot.x, spot.y - 18, 'Утащили!', C.alarm, 1.2); }
+  if (ok && !mate && spot) { sfx.thief(); if (inOwnWork()) addText(spot.x, spot.y - 18, 'Утащили!', C.alarm, 1.2); }
 }
 function onWRes(m) {
   const p = pendingW.get(m.rid);
   if (!p) return;
   pendingW.delete(m.rid);
-  if (!m.ok) undoSteal(p);
-}
-function undoSteal(p) {
-  const k = me.hands.lastIndexOf(p.type);
-  if (k >= 0) { me.hands.splice(k, 1); say('Не успели!'); sendState(true); }
+  if (!m.ok) undoAsk(p, p.give);
+  else if (Array.isArray(m.back) && m.back.length) undoAsk({}, m.back.filter(t => t in PARTS));
 }
 function onWDrop(m) {
   if (workFloor.some(i => i.id === m.id)) return;
@@ -947,10 +1154,12 @@ function hostStartRound(n) {
   startRoundLocal(n, seed);
   const count = 9 + 2 * crowd();
   for (let i = 0; i < count; i++) belt.push({ id: newId(), type: pickSpawnType(), off: r1(i * L / count + 20) });
-  net.send({ t: 'round', n, seed, rounds, duration, seats: matchSeats, belt: belt.map(packItem) });
+  net.send({ t: 'round', n, seed, rounds, duration, mode, seats: matchSeats, belt: belt.map(packItem) });
 }
 function startRoundLocal(n, seed) {
   round = n; roundSeed = seed;
+  roundParts();
+  urgent = null; pendingD = null; urgentAt = mode === 'brawl' ? 14 + Math.random() * 6 : 24 + Math.random() * 8;
   orderRng = mulberry32(seed); orderSeq = []; done = 0; score = 0;
   machines.forEach(m => { m.state = 'idle'; m.t = 0; m.dur = 1; m.inputs = []; m.broken = 0; });
   for (const mir of mirrors) { mir.m = newMachines(); mir.f = []; mir.ord = null; mir.bd = 0; }
@@ -981,6 +1190,7 @@ function startRoundLocal(n, seed) {
 const waitingFinals = () => others().filter(s => isOn(s) && !finals[s]);
 function hostEndRound() {
   state = 'roundover'; timeLeft = 0; rush = false; evt = null; banner = null; actionQueue.length = 0;
+  urgent = null; pendingD = null;
   finals = {};
   net.send({ t: 'end' });
   finalWait = waitingFinals().length ? 2.5 : 0.01;   // ждём итоги остальных, но недолго
@@ -989,6 +1199,7 @@ function hostEndRound() {
 function guestEndRound() {
   if (state === 'roundover' || state === 'shop' || state === 'over') return;
   state = 'roundover'; timeLeft = 0; rush = false; evt = null; banner = null; actionQueue.length = 0;
+  urgent = null; pendingD = null;
   hideOverlays();
   net.send({ t: 'final', s: score, d: done });
   sfx.end(); buzz(80);
@@ -1002,16 +1213,30 @@ function hostFinishRound() {
     const f = finals[st] || (peers[st] ? { s: peers[st].score, d: peers[st].done } : { s: 0, d: 0 });
     s[st] = f.s; d[st] = f.d;
   }
-  const top = Math.max(...seats.map(x => s[x]));
-  for (const st of seats) {
-    rank[st] = 1 + seats.filter(x => s[x] > s[st]).length;
-    // доплата отстающим: чем ниже место, тем больше
-    earn[st] = 15 + Math.floor(s[st] / 4) + (rank[st] > 1 ? 15 + 5 * (rank[st] - 2) : 0);
-    tally.total[st] += s[st]; tally.done[st] += d[st];
+  let ts = null;
+  if (teamsOn()) {
+    // командам — очки смены; отстающей смене доплата всем её игрокам
+    ts = [0, 0];
+    for (const st of seats) ts[teamOf(st)] += s[st];
+    for (const st of seats) {
+      const t = teamOf(st);
+      rank[st] = ts[t] >= ts[1 - t] ? 1 : 2;
+      earn[st] = 15 + Math.floor(s[st] / 4) + (rank[st] > 1 ? 15 : 0);
+      tally.total[st] += s[st]; tally.done[st] += d[st];
+    }
+    if (ts[0] !== ts[1]) for (const st of seats) if (rank[st] === 1) tally.wins[st]++;
+  } else {
+    const top = Math.max(...seats.map(x => s[x]));
+    for (const st of seats) {
+      rank[st] = 1 + seats.filter(x => s[x] > s[st]).length;
+      // доплата отстающим: чем ниже место, тем больше
+      earn[st] = 15 + Math.floor(s[st] / 4) + (rank[st] > 1 ? 15 + 5 * (rank[st] - 2) : 0);
+      tally.total[st] += s[st]; tally.done[st] += d[st];
+    }
+    const tops = seats.filter(x => s[x] === top);
+    if (tops.length === 1 && seats.length > 1) tally.wins[tops[0]]++;
   }
-  const tops = seats.filter(x => s[x] === top);
-  if (tops.length === 1 && seats.length > 1) tally.wins[tops[0]]++;
-  const m = { t: 'result', round, last: round >= rounds, seats, s, d, rank, earn, tally };
+  const m = { t: 'result', round, last: round >= rounds, seats, s, d, rank, earn, tally, ts };
   net.send(m);
   applyResult(m, true);
 }
@@ -1022,7 +1247,7 @@ function applyResult(m, schedule) {
   lastResultMsg = m;
   if (role !== 'host' && m.tally) tally = m.tally;
   if (Array.isArray(m.seats) && m.seats.includes(mySeat)) {
-    lastRes = { s: +m.s[mySeat] || 0, earn: +m.earn[mySeat] || 0, rank: +m.rank[mySeat] || 1, n: m.seats.length };
+    lastRes = { s: +m.s[mySeat] || 0, earn: +m.earn[mySeat] || 0, rank: +m.rank[mySeat] || 1, n: m.seats.length, ts: Array.isArray(m.ts) ? m.ts : null };
     wallet.coins += lastRes.earn;
   }
   myReady = false;
@@ -1048,6 +1273,10 @@ function ageFloor(dt) {
     else if (role !== 'host' && it.age > 30) hallFloor.splice(i, 1);
   }
 }
+const SPARKS = {
+  press: ['#ffb347', '#ffe08a'], winder: ['#e09a5e', '#f3c08f'], furnace: ['#ff7a2f', '#ffd36b'], grinder: ['#ffffff', '#bfe8ff'],
+  welder: ['#e8f6ff', '#8fd0ff', '#ffffff'], vulcanizer: ['#ffb15c', '#8a7f78'], molder: ['#9fe0c0', '#e8eef0'],
+};
 function updateMachines(dt) {
   const here = inOwnWork();
   for (const m of machines) {
@@ -1059,10 +1288,9 @@ function updateMachines(dt) {
     m.t += dt;
     if (here && Math.random() < dt * 16) {
       const fp = machFront(m, m.rect.w === m.rect.h ? 22 : 24);
-      const cols = m.type === 'press' ? ['#ffb347', '#ffe08a'] : m.type === 'winder' ? ['#e09a5e', '#f3c08f'] : m.type === 'furnace' ? ['#ff7a2f', '#ffd36b'] : ['#ffe08a', '#c8cdd0'];
-      burst(fp.x + (Math.random() - .5) * 20, fp.y + (Math.random() - .5) * 20, 1, cols, 130, .35, 2);
+      burst(fp.x + (Math.random() - .5) * 20, fp.y + (Math.random() - .5) * 20, 1, SPARKS[m.type] || ['#ffe08a', '#c8cdd0'], 130, .35, 2);
     }
-    if (here && (m.type === 'solder' || m.type === 'furnace') && Math.random() < dt * 4) { const fp = machFront(m, 0); burst(fp.x, fp.y, 1, ['rgba(220,225,222,.55)'], 18, 1, 6); }
+    if (here && (m.type === 'solder' || m.type === 'furnace' || m.type === 'vulcanizer') && Math.random() < dt * 4) { const fp = machFront(m, 0); burst(fp.x, fp.y, 1, ['rgba(220,225,222,.55)'], 18, 1, 6); }
     if (m.t >= m.dur) { m.state = 'ready'; sfx.ding(); wsDirty = true; }
   }
   // копии чужих станков идут сами, хозяин поправит при следующей рассылке
@@ -1087,6 +1315,7 @@ function hostTick(dt) {
       if (spawnT <= 0) { trySpawn(); spawnT = (evt && evt.id === 'supply' ? 0.32 : rush ? 0.8 : 1.1) * 2 / Math.max(2, matchSeats.length); }
     }
     hostEvents();
+    hostUrgent();
     if (!rush && timeLeft <= RUSH_AT) { rush = true; net.send({ t: 'rush' }); onRush(); }
   } else if (state === 'roundover' && finalWait > 0) {
     finalWait -= dt;
@@ -1119,7 +1348,9 @@ function update(dt) {
     } else if (state === 'play') {
       timeLeft = Math.max(0, timeLeft - dt); elapsed += dt;
       if (evt) evt.t += dt;
+      if (urgent) urgent.t += dt;
       if (role !== 'host' && evt && evt.t > evt.dur + 3) evt = null;   // если «конец события» потерялся
+      if (role !== 'host' && urgent && urgent.t > urgent.dur + 3) urgent = null;
     }
     if (role === 'host') hostTick(dt);
     const canMove = state === 'play';
@@ -1130,7 +1361,9 @@ function update(dt) {
     updatePeers(dt);
     ageFloor(dt);
     // хозяин мастерской молчит дольше 4 секунд — считаем, что не успели
-    for (const [rid, p] of pendingW) if (clock - p.at > 4) { pendingW.delete(rid); undoSteal(p); }
+    // отданное напарнику не возвращаем: скорее всего, дошло, а двоить детали хуже, чем потерять
+    for (const [rid, p] of pendingW) if (clock - p.at > 4) { pendingW.delete(rid); if (p.got) undoAsk(p); }
+    if (pendingD && clock - pendingD.at > 4) { me.hands.push(pendingD.type); pendingD = null; say('Приёмка не ответила'); }
     sendT -= dt;
     if (sendT <= 0) { sendT = SEND_EVERY; sendState(false); }
   }
@@ -1154,7 +1387,7 @@ const SERVER = serverMeta ? serverMeta.content : `${location.protocol === 'https
 // приглашение ведёт на сайт игры: с itch.io — на workers.dev, там вход по ссылке сразу в комнату
 const SITE = serverMeta ? SERVER.replace(/^ws/, 'http') + '/' : location.origin + location.pathname;
 // версия сетевых сообщений: игра есть и на своём сайте, и на itch.io — разные версии в одну комнату не пускаем
-const VERSION = 2;
+const VERSION = 3;
 let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
@@ -1271,9 +1504,8 @@ function onPeerState(s, m) {
   if (!q.here || q.scene !== scene) { q.x = x; q.y = y; }
   // кто-то вошёл ко мне в мастерскую
   if (scene === 'w' + mySeat && q.scene !== scene && q.here && state === 'play') {
-    sfx.alert(); buzz(40);
-    showBanner('Гость в мастерской!', `${SEAT[s].name} у вас — берегите детали`, colorOf(s));
     wsDirty = true;
+    if (rivals(mySeat, s)) { sfx.alert(); buzz(40); showBanner('Гость в мастерской!', `${SEAT[s].name} у вас — берегите детали`, colorOf(s)); }
   }
   q.here = true; q.scene = scene; q.tx = x; q.ty = y;
   q.fx = +m.fx || 0; q.fy = +m.fy || 0; q.moving = +m.mv || 0;
@@ -1301,12 +1533,12 @@ function hostTake(id, s, from) {
   else if (j >= 0) hallFloor.splice(j, 1);
   net.send(i >= 0 || j >= 0 ? { t: 'gone', id, by: s } : { t: 'deny', to: from, id });
 }
-function onShoved(m) {
-  if (state !== 'play' || m.sc !== me.scene) return;
+function onShoved(m, by) {
+  if (state !== 'play' || m.sc !== me.scene || !rivals(mySeat, by)) return;
   const sx = +m.x || 0, sy = +m.y || 0;
   if (Math.hypot(sx - me.x, sy - me.y) > 80) return;   // пока летело сообщение, уже разошлись
   let dx = me.x - sx, dy = me.y - sy; const d = Math.hypot(dx, dy) || 1;
-  getShoved(dx / d, dy / d, Math.min(600, +m.force || 300));
+  getShoved(dx / d, dy / d, Math.min(600, +m.force || 300), by);
 }
 
 // ---------- места в комнате (раздаёт создатель) ----------
@@ -1315,7 +1547,7 @@ function setSeat(s) {
   mySeat = s;
   flip = s >= 0 && !doorBottom(s);
   document.body.dataset.seat = s >= 0 ? String(s) : '0';
-  $('meWho').textContent = s >= 0 ? `Вы · ${SEAT[s].name.toLowerCase()}` : 'Вы';
+  $('meWho').textContent = whoText();
   clearLayers();
 }
 function rosterAdd(pid) {
@@ -1326,14 +1558,16 @@ function rosterAdd(pid) {
   return null;
 }
 function broadcastRoster() {
-  net.send({ t: 'roster', list: roster, match: matchSeats, rounds, duration });
+  net.send({ t: 'roster', list: roster, match: matchSeats, rounds, duration, mode });
   refreshStatus();
 }
+const setMode = v => { if (MODES[v]) mode = v; };
 function applyRoster(m) {
   roster = Array.isArray(m.list) ? m.list.filter(e => e && typeof e.pid === 'string' && e.seat >= 0 && e.seat < SEATS) : [];
   if (Array.isArray(m.match)) matchSeats = m.match.filter(s => s >= 0 && s < SEATS);
   if (m.rounds) rounds = m.rounds;
   if (m.duration) duration = m.duration;
+  setMode(m.mode);
   const e = roster.find(x => x.pid === myPid);
   setSeat(e ? e.seat : -1);
   refreshStatus();
@@ -1350,14 +1584,15 @@ function syncMsg(to) {
   for (const s of matchSeats) ready[s] = isReady(s);
   return {
     t: 'sync', to, state: state === 'menu' || state === 'wait' ? 'lobby' : state, resumeTo, rounds, duration, round, seed: roundSeed,
-    seats: matchSeats, roster, tl: r1(timeLeft), ph: r1(phase), el: r1(elapsed), count: r1(countT), rush,
-    evt: evt && { id: evt.id, t: r1(evt.t) }, tally, result: lastResultMsg, ready,
+    seats: matchSeats, roster, mode, tl: r1(timeLeft), ph: r1(phase), el: r1(elapsed), count: r1(countT), rush,
+    evt: evt && { id: evt.id, t: r1(evt.t), team: evt.team }, tally, result: lastResultMsg, ready,
+    urgent: urgent && urgent.by < 0 ? { id: urgent.id, type: urgent.type, pts: urgent.pts, dur: urgent.dur, t: r1(urgent.t) } : null,
     belt: belt.map(packItem), floor: hallFloor.map(packFloor), puddles: puddles.map(packPuddle),
   };
 }
 // подключились заново или впервые: догоняем создателя
 function applySync(m) {
-  applyRoster({ list: m.roster, match: m.seats, rounds: m.rounds, duration: m.duration });
+  applyRoster({ list: m.roster, match: m.seats, rounds: m.rounds, duration: m.duration, mode: m.mode });
   if (m.state === 'lobby') { if (state !== 'lobby') { startMatchLocal(); showLobby(); } return; }
   if (!inMatch()) { showWait(); return; }
   if (m.round && round !== m.round) startRoundLocal(m.round, m.seed);
@@ -1376,7 +1611,9 @@ function applySync(m) {
   puddles = (m.puddles || []).map(o => unpackPuddle(o, oil ? 1 : 0));
   phase = +m.ph || 0; timeLeft = +m.tl || 0; elapsed = +m.el || 0; rush = !!m.rush; countT = +m.count || 0;
   evt = null;
-  if (m.evt) applyEvent(m.evt.id, +m.evt.t || 0.01);
+  if (m.evt) applyEvent(m.evt.id, +m.evt.t || 0.01, m.evt.team);
+  urgent = null;
+  if (m.urgent) applyUrgent(m.urgent, +m.urgent.t || 0.01);
   if (m.tally) tally = m.tally;
   pending.clear();
   if (m.state === 'pause') {
@@ -1449,19 +1686,19 @@ function onNet(m, from) {
     case 'sync': if (fromHost && m.to === myPid) applySync(m); break;
     case 'lobby':
       if (!fromHost) break;
-      rounds = m.rounds; duration = m.duration;
+      rounds = m.rounds; duration = m.duration; setMode(m.mode);
       if (state !== 'lobby') { startMatchLocal(); showLobby(); } else refreshStatus();
       break;
     case 'match':
       if (!fromHost) break;
-      rounds = m.rounds; duration = m.duration;
+      rounds = m.rounds; duration = m.duration; setMode(m.mode);
       matchSeats = Array.isArray(m.seats) ? m.seats : [];
       startMatchLocal();
       if (!inMatch()) showWait();
       break;
     case 'round':
       if (!fromHost) break;
-      rounds = m.rounds; duration = m.duration;
+      rounds = m.rounds; duration = m.duration; setMode(m.mode);
       if (Array.isArray(m.seats)) matchSeats = m.seats;
       if (!inMatch()) { showWait(); break; }
       startRoundLocal(m.n, m.seed);
@@ -1485,12 +1722,17 @@ function onNet(m, from) {
     case 'take': if (role === 'host') hostTake(m.id, fs, from); break;
     case 'gone': if (fromHost) onGone(m); break;
     case 'deny': if (fromHost && m.to === myPid) onDeny(m.id); break;
-    case 'evt': if (fromHost) applyEvent(m.id); break;
+    case 'evt': if (fromHost) applyEvent(m.id, 0, m.team); break;
+    case 'urgent': if (fromHost && inMatch()) applyUrgent(m); break;
+    case 'urgentEnd': if (fromHost) applyUrgentEnd(m); break;
+    case 'deliver': if (role === 'host') hostDeliver(m, fs, from); break;
+    case 'dres': if (fromHost && m.to === myPid) onDeliverDenied(String(m.rid)); break;
+    case 'bounty': if (m.to === myPid && fs >= 0) onBounty(m.pts); break;
     case 'evtEnd': if (fromHost) evt = null; break;
     case 'oil': if (fromHost && Array.isArray(m.list)) puddles = m.list.map(o => unpackPuddle(o)); break;
     case 'brk': if (fromHost && inMatch()) applyBreakdown(m.type); break;
     case 'rush': if (fromHost && !rush) { rush = true; onRush(); } break;
-    case 'shove': if (m.to === myPid) onShoved(m); break;
+    case 'shove': if (m.to === myPid) onShoved(m, fs); break;
     case 'ws': if (fs >= 0 && fs !== mySeat) applyWs(fs, m); break;
     case 'wtake': if (m.o === mySeat && inMatch()) onWTake(m, from); break;
     case 'wres': if (m.to === myPid) onWRes(m); break;
@@ -1665,6 +1907,51 @@ function drawMachine(m) {
       g.beginPath(); g.moveTo(0, hh - 3); g.lineTo(ax, 2); g.stroke();
       dot(g, ax, 2, 3, C.hazard);
     } else def.in.forEach((type, i) => drawItem(g, type, pads[i], -1, 0.55, m.inputs.includes(type) ? 1 : 0.3));
+  } else if (m.type === 'grinder') {
+    // круг сзади, стекло на столике спереди
+    dot(g, 0, -10, 11, '#1f2522');
+    g.save(); g.translate(0, -10); g.rotate(work && !m.broken ? clock * 18 : 0);
+    g.strokeStyle = '#9aa3a8'; g.lineWidth = 2.5; g.beginPath(); g.arc(0, 0, 8, 0, PI * 2); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 1.5;
+    for (let i = 0; i < 4; i++) { g.rotate(PI / 2); g.beginPath(); g.moveTo(2, 0); g.lineTo(7, 0); g.stroke(); }
+    g.restore();
+    rr(g, -11, 2, 22, 12, 3); g.fillStyle = '#1f2522'; g.fill();
+    if (work) { drawItem(g, 'glass', 0, 8, 0.5, 1 - k); drawItem(g, 'lens', 0, 8, 0.5, k); }
+    else if (ready) drawItem(g, 'lens', 0, 8, 0.6);
+    else drawItem(g, 'glass', 0, 8, 0.5, m.inputs.length ? 1 : 0.3);
+  } else if (m.type === 'molder') {
+    // бункер с гранулами сзади, форма спереди
+    g.fillStyle = '#2a3330';
+    g.beginPath(); g.moveTo(-13, -19); g.lineTo(13, -19); g.lineTo(6, -7); g.lineTo(-6, -7); g.closePath(); g.fill();
+    if (!ready) drawItem(g, 'plastic', 0, -14, 0.45, work || m.inputs.length ? 1 : 0.3);
+    rr(g, -14, -4, 28, 18, 4); g.fillStyle = '#1f2522'; g.fill();
+    if (work) {
+      const pulse = m.broken ? 0 : Math.abs(Math.sin(m.t * 5));
+      rr(g, -12, -2, 24, 14, 3); g.fillStyle = `rgba(255,170,90,${0.2 + 0.3 * pulse})`; g.fill();
+      drawItem(g, 'keys', 0, 5, 0.5, k);
+    } else if (ready) drawItem(g, 'keys', 0, 5, 0.6);
+  } else if (m.type === 'welder') {
+    const pads = [-10, 10];
+    for (let i = 0; i < 2; i++) { rr(g, pads[i] - 9, -10, 18, 18, 3); g.fillStyle = '#18201f'; g.fill(); }
+    if (ready) drawItem(g, 'frame', 0, -1, 0.75);
+    else if (work) {
+      drawItem(g, 'blank', pads[0], -1, 0.5);
+      drawItem(g, 'bolt', pads[1], -1, 0.5);
+      if (!m.broken && Math.floor(clock * 20) % 2) { dot(g, 0, -1, 7, 'rgba(140,200,255,.35)'); dot(g, 0, -1, 3.5, '#e8f6ff'); }
+      g.strokeStyle = '#7d868b'; g.lineWidth = 3; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(hw - 4, hh - 4); g.lineTo(3, 2); g.stroke();
+    } else def.in.forEach((type, i) => drawItem(g, type, pads[i], -1, 0.5, m.inputs.includes(type) ? 1 : 0.3));
+  } else if (m.type === 'vulcanizer') {
+    // круглая пресс-форма: резина в ней становится шиной
+    dot(g, 0, -2, 15, '#1c1a19');
+    g.strokeStyle = '#3a3532'; g.lineWidth = 3; g.beginPath(); g.arc(0, -2, 15, 0, PI * 2); g.stroke();
+    if (work) {
+      g.strokeStyle = `rgba(255,140,60,${m.broken ? 0.2 : 0.45 + 0.3 * Math.sin(clock * 10)})`; g.lineWidth = 2;
+      g.beginPath(); g.arc(0, -2, 12.5, 0, PI * 2); g.stroke();
+      drawItem(g, 'rubber', 0, -2, 0.55, 1 - k);
+      drawItem(g, 'tire', 0, -2, 0.6, k);
+    } else if (ready) drawItem(g, 'tire', 0, -2, 0.75);
+    else drawItem(g, 'rubber', 0, -2, 0.55, m.inputs.length ? 1 : 0.3);
   }
   let lamp = 'rgba(255,255,255,.35)';
   if (m.broken) lamp = Math.floor(clock * 8) % 2 ? C.alarm : '#7a2a22';
@@ -1686,12 +1973,12 @@ function drawMachine(m) {
   g.restore();
 }
 // верстак: slots — что нужно, have — что уже положено, doneT — штамп «ГОТОВО»
-function drawBench(slots, have, col, doneT) {
+function drawBench(slots, have, col, doneT, owner) {
   const { x, y, w, h } = bench.rect;
   g.fillStyle = 'rgba(0,0,0,.3)'; g.fillRect(x + 3, y + 4, w - 2, h - 2);
   rr(g, x + 2, y + 2, w - 4, h - 4, 5); g.fillStyle = '#5c6a61'; g.fill();
   rr(g, x + 4, y + 4, w - 8, h - 8, 4); g.fillStyle = '#71807a'; g.fill();
-  if (evt && evt.id === 'bonus') {
+  if (bonusFor(owner)) {
     g.save(); g.globalAlpha = 0.6 + 0.4 * Math.sin(clock * 8);
     rr(g, x + 1, y + 1, w - 2, h - 2, 6); g.strokeStyle = C.hazard; g.lineWidth = 3; g.stroke();
     g.restore();
@@ -1723,7 +2010,7 @@ function drawBench(slots, have, col, doneT) {
     g.restore();
   }
 }
-const BAD_KINDS = ['benchNo', 'benchBusy', 'mNo', 'mBusy', 'vNo', 'vBench'];
+const BAD_KINDS = ['benchNo', 'benchBusy', 'mNo', 'mBusy', 'vNo', 'vBench', 'deliverNo'];
 const STEAL_KINDS = ['vTake', 'vUnload', 'vFloor'];
 function drawTarget() {
   const t = me.target;
@@ -1737,12 +2024,18 @@ function drawTarget() {
     g.beginPath(); g.arc(t.x, t.y, 16, 0, PI * 2); g.stroke();
   } else if (t.m) { const r = t.m.rect; rr(g, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 7); g.stroke(); }
   else if (t.b) { const r = t.b.rect; rr(g, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 7); g.stroke(); }
+  else if (t.w) { const r = t.w; rr(g, r.x + 3, r.y + 2, r.w - 6, r.h - 4, 7); g.stroke(); }
   else if (t.kind === 'shove') { g.strokeStyle = C.alarm; g.beginPath(); g.arc(t.q.x, t.q.y, 22, 0, PI * 2); g.stroke(); }
   g.restore();
 }
-function drawPlayer(p, main, dark, box) {
+function drawPlayer(p, main, dark, box, lead) {
   g.save();
   g.translate(p.x, p.y);
+  if (lead) {   // передовик «Схватки» — в каске и с мигающим ободком
+    g.save(); g.globalAlpha = 0.45 + 0.3 * Math.sin(clock * 5);
+    g.strokeStyle = C.hazard; g.lineWidth = 2.5; g.beginPath(); g.arc(0, 0, 21, 0, PI * 2); g.stroke();
+    g.restore();
+  }
   g.fillStyle = 'rgba(0,0,0,.28)'; g.beginPath(); g.ellipse(2, 5, 16, 12, 0, 0, PI * 2); g.fill();
   g.save();
   g.rotate(Math.atan2(p.fy, p.fx));
@@ -1758,6 +2051,12 @@ function drawPlayer(p, main, dark, box) {
   g.beginPath(); g.arc(1, 0, 9.5, 0, PI * 2); g.fill();
   g.strokeStyle = 'rgba(0,0,0,.3)'; g.lineWidth = 1.2; g.stroke();
   dot(g, 9.5, 0, 2, '#fff3b0');
+  if (lead) {
+    dot(g, 0.5, 0, 8.4, C.hazard);
+    g.strokeStyle = '#9a7412'; g.lineWidth = 1.2; g.stroke();
+    g.fillStyle = '#d9a521'; g.fillRect(-7, -1.3, 14, 2.6);
+    g.strokeStyle = '#f7d860'; g.lineWidth = 2.4; g.beginPath(); g.arc(1, 0, 11, -0.8, 0.8); g.stroke();
+  }
   g.restore();
   g.beginPath(); g.ellipse(-3, -4, 3.5, 2.2, -0.6, 0, PI * 2); g.fillStyle = 'rgba(255,255,255,.4)'; g.fill();
   g.restore();
@@ -1832,16 +2131,51 @@ function drawBanner() {
   g.restore();
 }
 function drawScenePlayers() {
-  const list = scenePlayers();
+  const list = scenePlayers(), lead = leaderSeat();
   const flipped = viewFlipped();
   list.sort((a, b) => flipped ? b.y - a.y : a.y - b.y);
   for (const p of list) {
-    if (p === me) drawPlayer(me, myColor(), darkOf(mySeat), up().cap > 0);
-    else drawPlayer(p, colorOf(p.seat), darkOf(p.seat), p.hands.length > 1);
+    if (p === me) drawPlayer(me, myColor(), darkOf(mySeat), up().cap > 0, mySeat === lead);
+    else drawPlayer(p, colorOf(p.seat), darkOf(p.seat), p.hands.length > 1, p.seat === lead);
+  }
+}
+// окна приёмки: закрыты, пока нет срочного заказа; открыто — видно, что ждут и сколько дадут
+function drawWindows() {
+  if (!urgentOn()) return;
+  const open = !!urgent && urgent.by < 0;
+  for (const w of WINDOWS) {
+    const x = w.x + 6, y = w.y + 5, ww = w.w - 12, hh = w.h - 10, cx = x + ww / 2, cy = y + hh / 2;
+    rr(g, x, y, ww, hh, 5); g.fillStyle = open ? '#151917' : '#2c332e'; g.fill();
+    g.lineWidth = 3; g.strokeStyle = open ? C.hazard : '#4a524c'; g.stroke();
+    g.save(); g.translate(cx, cy); if (viewFlipped()) g.rotate(PI);
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    if (open) {
+      drawItem(g, urgent.type, -26, -2, 0.95);
+      g.font = '17px ' + FONT_D; g.fillStyle = C.hazard; g.fillText(`+${urgent.pts}`, 24, -1);
+      const k = Math.max(0, 1 - urgent.t / urgent.dur);
+      g.fillStyle = 'rgba(242,194,48,.35)'; g.fillRect(-ww / 2 + 6, hh / 2 - 6, ww - 12, 3);
+      g.fillStyle = C.hazard; g.fillRect(-ww / 2 + 6, hh / 2 - 6, (ww - 12) * k, 3);
+    } else {
+      g.font = '600 11px ' + FONT_B; g.fillStyle = 'rgba(238,242,234,.42)'; g.fillText('ПРИЁМКА', 0, 1);
+    }
+    g.restore();
+  }
+}
+// «Пропускной режим»: двери соперников перегорожены
+function drawShutDoors() {
+  if (!evt || evt.id !== 'guard') return;
+  for (const s of matchSeats) {
+    if (!rivals(mySeat, s)) continue;
+    const d = DOORS[s], x = d.c * T, y = d.r * T;
+    g.fillStyle = 'rgba(20,22,20,.78)'; g.fillRect(x, y, 2 * T, T);
+    g.strokeStyle = C.alarm; g.lineWidth = 4; g.lineCap = 'butt';
+    for (let i = 0; i < 4; i++) { const xx = x + 12 + i * 24; g.beginPath(); g.moveTo(xx, y + 6); g.lineTo(xx, y + T - 6); g.stroke(); }
   }
 }
 function drawHall() {
   g.drawImage(hallLayerNow(), 0, 0, W, H);
+  drawWindows();
+  drawShutDoors();
   drawPuddles();
   drawBelt();
   g.save(); g.setTransform(scale, 0, 0, scale, 0, 0); drawDial(); g.restore();
@@ -1860,8 +2194,8 @@ function drawWork() {
   const o = ownerOf(me.scene), own = o === mySeat;
   g.drawImage(workLayer(o), 0, 0, W, H);
   sceneMachines(me.scene).forEach(drawMachine);
-  if (own) drawBench(order && order.prod.slots, order ? order.have : {}, myColor(), bench.doneT);
-  else { const ord = mirrors[o].ord; drawBench(ord && ord.sl, ord ? ord.h : {}, colorOf(o), mirrors[o].bd); }
+  if (own) drawBench(order && order.prod.slots, order ? order.have : {}, myColor(), bench.doneT, o);
+  else { const ord = mirrors[o].ord; drawBench(ord && ord.sl, ord ? ord.h : {}, colorOf(o), mirrors[o].bd, o); }
   for (const it of sceneFloor(me.scene)) drawItem(g, it.type, it.x, it.y, 1, 1, true);
   me.target = state === 'play' && me.stun <= 0 ? findTarget(me) : null;
   drawTarget();
@@ -1889,6 +2223,7 @@ addEventListener('resize', fitCanvas);
 const ACT_LABEL = {
   belt:'Взять', floor:'Взять', wfloor:'Взять', mTake:'Взять', mUnload:'Забрать', mLoad:'Загрузить', repair:'Чинить',
   bench:'Положить', beltPut:'На ленту', drop:'Бросить', shove:'Толкнуть', vTake:'Утащить', vUnload:'Утащить', vFloor:'Утащить',
+  deliver:'Сдать',
 };
 let shownAct = '', shownTime = '', shownRush = null, shownEvt = null, shownRnd = '', shownOthers = '';
 function draw() {
@@ -1925,7 +2260,7 @@ function whereOf(s) {
   const o = ownerOf(q.scene);
   if (o < 0) return 'в цехе';
   if (o === s) return 'у себя';
-  if (o === mySeat) return 'у вас!';
+  if (o === mySeat) return isMate(s) ? 'у вас' : 'у вас!';
   return `у ${SEAT[o].gen}`;
 }
 const settled = () => lastResultRound === round;
@@ -1943,10 +2278,11 @@ function hudFrame() {
     const parts = [];
     if (rush) { parts.push('Аврал'); bad = true; }
     if (evt) parts.push(`${evt.short} · ${Math.max(1, Math.ceil(evt.dur - evt.t))} с`);
+    if (urgent && urgent.by < 0) parts.push(`Срочно: ${PARTS[urgent.type].name.toLowerCase()} · ${Math.max(1, Math.ceil(urgent.dur - urgent.t))} с`);
     const broken = machines.filter(m => m.broken > 0).map(m => MACHINES[m.type].tag);
     if (broken.length) { parts.push('Чинить: ' + broken.join(', ')); if (!evt) bad = true; }
     const o = ownerOf(me.scene);
-    if (o >= 0 && o !== mySeat) parts.unshift(`В гостях у ${SEAT[o].gen}`);
+    if (o >= 0 && o !== mySeat) parts.unshift(isMate(o) ? 'У напарника' : `В гостях у ${SEAT[o].gen}`);
     ev = parts.join(' · ');
   }
   const evKey = ev + bad;
@@ -1961,27 +2297,39 @@ function hudFrame() {
   renderOthers();
 }
 function renderOthers() {
-  const list = (matchState() || state === 'over' ? matchSeats : roster.map(e => e.seat)).filter(s => s !== mySeat).sort();
-  const rows = list.map(s => [s, liveScore(s), whereOf(s)]);
+  // напарник — первым и с ободком у кружка, передовик «Схватки» — со звёздочкой
+  const list = (matchState() || state === 'over' ? matchSeats : roster.map(e => e.seat)).filter(s => s !== mySeat).sort((a, b) => isMate(b) - isMate(a) || a - b);
+  const lead = leaderSeat();
+  const rows = list.map(s => [s, liveScore(s), (s === lead ? '★ ' : '') + whereOf(s), isMate(s)]);
   const key = JSON.stringify(rows);
   if (key === shownOthers) return;
   shownOthers = key;
   const box = $('others');
   box.textContent = '';
   box.classList.toggle('solo', rows.length === 1);
-  for (const [s, sc, where] of rows) {
+  for (const [s, sc, where, mate] of rows) {
     const row = document.createElement('div');
-    row.className = 'orow' + (where === 'у вас!' ? ' alarm' : '');
+    row.className = 'orow' + (where.endsWith('у вас!') ? ' alarm' : '') + (mate ? ' mate' : '');
     const dotEl = document.createElement('i'); dotEl.style.background = colorOf(s);
     const b = document.createElement('b'); b.textContent = sc; b.style.color = colorOf(s);
     const span = document.createElement('span'); span.textContent = where;
     row.append(dotEl, b, span);
-    row.title = SEAT[s].name;
+    row.title = SEAT[s].name + (mate ? ' · напарник' : '');
     box.appendChild(row);
   }
 }
+const teamLive = t => teamSeats(t).reduce((a, s) => a + liveScore(s), 0);
+function whoText() {
+  if (mySeat < 0) return 'Вы';
+  if (teamsOn() && inMatch()) return `Вы · ${TEAMS[teamOf(mySeat)].short}`;
+  return leaderSeat() === mySeat ? 'Вы · передовик' : `Вы · ${SEAT[mySeat].name.toLowerCase()}`;
+}
 function renderHud() {
-  $('meScore').textContent = mySeat >= 0 ? liveScore(mySeat) : 0;
+  // в командах — счёт смен: ваша первой
+  const duo = teamsOn() && inMatch(), t = teamOf(mySeat);
+  $('meScore').textContent = mySeat < 0 ? 0 : duo ? `${teamLive(t)}:${teamLive(1 - t)}` : liveScore(mySeat);
+  $('meScore').classList.toggle('duo', duo);
+  $('meWho').textContent = whoText();
   const box = $('chips');
   box.textContent = '';
   $('oname').textContent = order ? `${order.prod.name} · ${order.prod.value}` : '';
@@ -2034,10 +2382,13 @@ function refreshStatus() {
   else if (!host && !hostOnline()) { t = 'Создателя комнаты нет в сети. Проверьте код или подождите.'; k = 'wait'; }
   else if (!host && mySeat < 0) { t = 'Входим в комнату…'; k = 'wait'; }
   else if (here < 2) { t = 'Ждём соперников. Отправьте код или ссылку.'; k = 'wait'; }
+  else if (here < minPlayers()) { t = 'Для команд нужно 3 или 4 игрока'; k = 'wait'; }
   else { t = host ? `Игроков: ${here} из 4. Можно начинать` : `Игроков: ${here} из 4. Матч начнёт создатель комнаты`; k = 'ok'; }
   setStatus($('lobbyStatus'), t, k);
-  $('btnStart').disabled = !(host && net.ok && here >= 2);
-  $('guestOpts').textContent = `Матч: ${rounds} ${plural(rounds, ['раунд', 'раунда', 'раундов'])} по ${duration >= 120 ? '2 минуты' : duration + ' секунд'}.`;
+  $('btnStart').disabled = !(host && net.ok && here >= minPlayers());
+  $('guestOpts').textContent = `${MODES[mode].name}. Матч: ${rounds} ${plural(rounds, ['раунд', 'раунда', 'раундов'])} по ${duration >= 120 ? '2 минуты' : duration + ' секунд'}.`;
+  $('modeDesc').textContent = MODES[mode].desc;
+  $('teamHead').hidden = !teamsOn();
   renderRoster();
   const missing = others().filter(s => !isOn(s));
   if (!net.ok) setStatus($('pauseStatus'), 'Нет связи с сервером, переподключаемся…', 'bad');
@@ -2052,9 +2403,11 @@ function refreshStatus() {
   if (state === 'shop') renderShop();
 }
 function inviteUrl() { return `${SITE}?room=${net.room}`; }
+const minPlayers = () => teamsOn() ? 3 : 2;
 function showLobby() {
   state = 'lobby';
   const host = role === 'host';
+  if (host) mode = pickedMode();
   if (host) { roster = roster.filter(e => isOn(e.seat)); broadcastRoster(); }   // выбывших за время матча отпускаем
   $('lobbyEyebrow').textContent = host ? 'Ваша комната · отправьте код соперникам' : 'Вы вошли в комнату';
   $('lobbyCode').textContent = net.room;
@@ -2098,9 +2451,14 @@ function showShop() {
 }
 function renderShop(flashId) {
   const el = $('shopBody'), r = lastRes || { s: 0, earn: 0, rank: 1, n: 2 };
-  const res = r.rank === 1 ? 'Раунд ваш!' : r.n === 2 ? 'Раунд за соперником' : `${r.rank}-е место в раунде`;
+  let res = r.rank === 1 ? 'Раунд ваш!' : r.n === 2 ? 'Раунд за соперником' : `${r.rank}-е место в раунде`;
   let sub = `+${r.s} ${plural(r.s, ['очко', 'очка', 'очков'])} за раунд · всего ${tally.total[mySeat] || 0} · заработано ${r.earn} ₽`;
   if (r.rank > 1) sub += ', с доплатой отстающему';
+  if (teamsOn() && r.ts) {
+    const t = teamOf(mySeat);
+    res = r.ts[0] === r.ts[1] ? 'Ничья в раунде' : r.rank === 1 ? 'Раунд за вашей сменой!' : `Раунд за ${TEAMS[1 - t].ins}`;
+    sub = `Смены ${r.ts[t]} : ${r.ts[1 - t]} · ваши +${r.s} · заработано ${r.earn} ₽${r.rank > 1 ? ', с доплатой отстающей смене' : ''}`;
+  }
   const need = readyNeeded(), readyN = need.filter(isReady).length;
   const st = readyN === need.length ? ['ok', 'Все готовы'] : ['wait', `Готовы: ${readyN} из ${need.length}`];
   el.innerHTML = `
@@ -2148,12 +2506,14 @@ $('shopBody').addEventListener('click', e => {
   }
 });
 function showFinal() {
+  if (teamsOn()) { showTeamFinal(); return; }
   state = 'over';
   const seats = matchSeats.slice().sort((a, b) => tally.total[b] - tally.total[a] || a - b);
   const place = s => 1 + seats.filter(x => tally.total[x] > tally.total[s]).length;
   const mine = place(mySeat), tied = seats.filter(s => place(s) === 1).length;
   $('vTitle').textContent = mine === 1 ? (tied > 1 ? 'Ничья' : 'Победа!') : `${mine}-е место`;
   $('vTitle').classList.toggle('win', mine === 1 && tied === 1);
+  $('vTitle').classList.remove('long');
   const ol = $('standings');
   ol.textContent = '';
   for (const s of seats) {
@@ -2167,6 +2527,40 @@ function showFinal() {
     sm.textContent = `раундов выиграно: ${tally.wins[s]} · ${tally.done[s]} ${plural(tally.done[s], ['изделие', 'изделия', 'изделий'])}`;
     name.appendChild(sm);
     const b = document.createElement('b'); b.textContent = tally.total[s]; b.style.color = colorOf(s);
+    li.append(pl, dotEl, name, b);
+    ol.appendChild(li);
+  }
+  refreshStatus();
+  showSheet('over');
+  releaseAwake();
+}
+// итоги командного матча: смены по сумме очков, под каждой — её игроки
+function showTeamFinal() {
+  state = 'over';
+  const tot = [0, 0];
+  for (const s of matchSeats) tot[teamOf(s)] += tally.total[s];
+  const mine = teamOf(mySeat), order2 = tot[0] === tot[1] ? [mine, 1 - mine] : tot[0] > tot[1] ? [0, 1] : [1, 0];
+  $('vTitle').textContent = tot[0] === tot[1] ? 'Ничья' : tot[mine] > tot[1 - mine] ? 'Победа!' : `Победа ${TEAMS[1 - mine].gen}`;
+  $('vTitle').classList.toggle('win', tot[mine] > tot[1 - mine]);
+  $('vTitle').classList.toggle('long', tot[mine] < tot[1 - mine]);
+  const ol = $('standings');
+  ol.textContent = '';
+  for (const t of order2) {
+    const seats = teamSeats(t);
+    const li = document.createElement('li');
+    if (t === mine) li.className = 'me';
+    const pl = document.createElement('span'); pl.className = 'pl'; pl.textContent = tot[t] >= tot[1 - t] ? 1 : 2;
+    // кружок пополам — цвета игроков смены
+    const dotEl = document.createElement('i');
+    const cols = seats.map(colorOf);
+    dotEl.style.background = cols.length > 1 ? `linear-gradient(90deg, ${cols[0]} 50%, ${cols[1]} 50%)` : cols[0];
+    const name = document.createElement('span');
+    name.textContent = TEAMS[t].name + (t === mine ? ' · ваша' : '');
+    const sm = document.createElement('small');
+    const wins = seats.length ? tally.wins[seats[0]] : 0;
+    sm.textContent = seats.map(s => `${SEAT[s].name} ${tally.total[s]}`).join(' · ') + ` · раундов: ${wins}`;
+    name.appendChild(sm);
+    const b = document.createElement('b'); b.textContent = tot[t]; b.style.color = colorOf(seats[0]);
     li.append(pl, dotEl, name, b);
     ol.appendChild(li);
   }
@@ -2273,27 +2667,29 @@ $('joinForm').addEventListener('submit', e => {
   enterRoom(code, 'guest');
 });
 $('btnShare').addEventListener('click', share);
+const pickedMode = () => { const el = document.querySelector('input[name="mode"]:checked'); return el && MODES[el.value] ? el.value : 'classic'; };
 $('btnStart').addEventListener('click', () => {
   if (role !== 'host') return;
   const seats = roster.filter(e => isOn(e.seat)).map(e => e.seat).sort();
-  if (seats.length < 2) return;
+  mode = pickedMode();
+  if (seats.length < minPlayers()) return;
   rounds = radioVal('rounds', 3); duration = radioVal('dur', 90);
   ensureAudio();
   matchSeats = seats;
-  net.send({ t: 'match', rounds, duration, seats });
+  net.send({ t: 'match', rounds, duration, seats, mode });
   startMatchLocal();
   hostStartRound(1);
 });
-document.querySelectorAll('input[name="rounds"],input[name="dur"]').forEach(r => r.addEventListener('change', () => {
+document.querySelectorAll('input[name="rounds"],input[name="dur"],input[name="mode"]').forEach(r => r.addEventListener('change', () => {
   if (role !== 'host' || state !== 'lobby') return;
-  rounds = radioVal('rounds', 3); duration = radioVal('dur', 90);
+  rounds = radioVal('rounds', 3); duration = radioVal('dur', 90); mode = pickedMode();
   broadcastRoster();
 }));
 $('btnAgain').addEventListener('click', () => {
   if (role !== 'host') return;
   startMatchLocal();
   showLobby();
-  net.send({ t: 'lobby', rounds, duration });
+  net.send({ t: 'lobby', rounds, duration, mode });
 });
 $('btnResume').addEventListener('click', () => resumeGame(true));
 $('btnPause').addEventListener('click', e => { e.currentTarget.blur(); pauseGame(true); });
@@ -2343,8 +2739,12 @@ if (DEBUG) {
     get timeLeft() { return timeLeft; }, set timeLeft(v) { timeLeft = v; }, get phase() { return phase; }, get evt() { return evt; },
     get net() { return net; }, get pending() { return pending; }, get pendingW() { return pendingW; }, get code() { return net.room; },
     get puddles() { return puddles; }, get online() { return [...online]; },
+    get mode() { return mode; }, get urgent() { return urgent; }, get pendingD() { return pendingD; }, get leader() { return leaderSeat(); },
+    get roundRaw() { return roundRaw; }, get roundMade() { return roundMade; }, get solo() { return soloMult(); },
     act: queueAction, enter: enterScene, beltPos: it => pathPos(beltS(it)), speed: beltSpeedNow,
     event: id => { if (role === 'host') { evt = null; startEvent(id); } },
+    urgentNow: type => { if (role === 'host' && state === 'play') { if (urgent) endUrgent(-1, ''); startUrgent(type); } },
+    target: () => { const t = findTarget(me); return t && t.kind; },
     place(x, y, fx = 0, fy = -1) { Object.assign(me, { x, y, fx, fy, vx: 0, vy: 0, kx: 0, ky: 0 }); },
   };
 }
