@@ -149,7 +149,7 @@ let urgent = null, urgentAt = 0, urgentSeq = 0, pendingD = null;
 function newWallet() { return { coins: 0, up: Object.fromEntries(UPGRADES.map(u => [u.id, 0])) }; }
 function newTally() { return { total: [0, 0, 0, 0], wins: [0, 0, 0, 0], done: [0, 0, 0, 0] }; }
 const up = () => wallet.up;
-const capOf = () => 1 + wallet.up.cap;
+const capOf = () => 1 + wallet.up.cap + (evt && evt.id === 'carts' ? 1 : 0);   // «Выдали тележки» — на деталь больше
 const colorOf = s => SEAT[s] ? SEAT[s].main : C.ink;
 const darkOf = s => SEAT[s] ? SEAT[s].dark : '#555';
 const myColor = () => colorOf(mySeat);
@@ -177,7 +177,7 @@ const TEAMS = [
   { name: 'Дневная смена', short: 'дневная', gen: 'дневной смены', dat: 'дневной смене', ins: 'дневной сменой' },
   { name: 'Ночная смена', short: 'ночная', gen: 'ночной смены', dat: 'ночной смене', ins: 'ночной сменой' },
 ];
-const BOUNTY = 10;
+const BOUNTY = 10, MELEE = 5, RACE = 30;
 const teamsOn = () => mode === 'teams';
 const teamOf = s => s % 2;   // места 0 и 2 — двери внизу, 1 и 3 — вверху: у каждой смены своя сторона цеха
 const isMate = s => teamsOn() && s >= 0 && s !== mySeat && teamOf(s) === teamOf(mySeat);
@@ -199,6 +199,8 @@ function leaderSeat() {
 }
 // премия ×2 к заказам у этого места: общая или своей смене
 const bonusFor = s => !!evt && (evt.id === 'bonus' || (evt.id === 'teamBonus' && teamOf(s) === evt.team));
+const doneOf = s => s === mySeat ? done : peers[s] ? peers[s].done : 0;   // сколько изделий за раунд — для «Гонки смен»
+const machRate = () => evt && evt.id === 'turbo' ? 2 : 1;   // «Ударная смена» — станки вдвое быстрее
 
 // ---------- игроки ----------
 function makePlayer() {
@@ -425,6 +427,7 @@ const sfx = {
   door:   () => { tone(260, .07, 'triangle', .05, 160); tone(520, .08, 'triangle', .035, 0, .06); },
   join:   () => { tone(659, .1, 'square', .04); tone(988, .16, 'square', .04, 0, .1); },
   thief:  () => { tone(300, .1, 'sawtooth', .05, -120); tone(200, .16, 'sawtooth', .05, -80, .1); },
+  beep:   () => tone(1250, .06, 'square', .025),
 };
 
 // ---------- ввод ----------
@@ -610,11 +613,13 @@ function findTarget(p) {
       const cs = pathClosest(ix, iy);
       take(cs.d, 30, { kind:'beltPut', s:cs.s, x:cs.x, y:cs.y }, 14);
     }
-    // окна приёмки срочных заказов — посреди верхней и нижней стены
-    if (holding && urgent && urgent.by < 0) {
+    // окна приёмки срочных заказов — посреди верхней и нижней стены. У закрытого окна деталь не роняем:
+    // кто нажал на миг позже, чем заказ закрылся, услышит «Приёмка закрыта»
+    if (holding && urgentOn()) {
+      const open = urgent && urgent.by < 0;
       for (const w of WINDOWS) {
         const d = rectDist(ix, iy, w);
-        if (p.hands.includes(urgent.type) && !pendingD) take(d, 24, { kind:'deliver', w });
+        if (open && p.hands.includes(urgent.type) && !pendingD) take(d, 24, { kind:'deliver', w });
         else take(d, 24, { kind:'deliverNo', w }, 10);
       }
     }
@@ -727,24 +732,27 @@ function getShoved(dx, dy, force, by) {
   me.guard = me.stun + GUARD;
   if (arm < 2) while (me.hands.length) dropItem(me.hands.pop(), me.x + (Math.random() - .5) * 16, me.y + (Math.random() - .5) * 16);
   addText(me.x, over(me), 'Ой!', C.ink, 0.9);
-  // «Схватка»: толкнувший передовика забирает его очки
-  if (by >= 0 && by !== mySeat && leaderSeat() === mySeat) {
-    const pts = Math.min(score, BOUNTY * (evt && evt.id === 'hunt' ? 2 : 1));
-    score -= pts;
-    net.send({ t: 'bounty', to: pidOf(by), pts });
-    addText(me.x, over(me, 54), `−${pts}`, C.alarm, 1.3, true);
-    renderHud(); sendScore();
+  // «Схватка»: толкнувший передовика забирает его очки, в «Стенку на стенку» — очки любого
+  const lead = leaderSeat() === mySeat, melee = evt && evt.id === 'melee';
+  if (by >= 0 && by !== mySeat && (lead || melee)) {
+    const pts = Math.min(score, lead ? BOUNTY * (evt && evt.id === 'hunt' ? 2 : 1) : MELEE);
+    if (pts > 0) {
+      score -= pts;
+      net.send({ t: 'bounty', to: pidOf(by), pts, lead: lead ? 1 : 0 });
+      addText(me.x, over(me, 54), `−${pts}`, C.alarm, 1.3, true);
+      renderHud(); sendScore();
+    }
   }
   burst(me.x, me.y, 10, ['#d8d2c0', '#a9a291'], 130, .4, 3);
   sfx.shove(); buzz(50);
   sendState(true);
 }
-function onBounty(pts) {
+function onBounty(pts, lead) {
   if (state !== 'play') return;
   pts = Math.max(0, Math.min(4 * BOUNTY, Math.round(+pts || 0)));
   if (!pts) return;
   score += pts;
-  addText(me.x, over(me, 40), `+${pts} за передовика`, myColor(), 1.4, true);
+  addText(me.x, over(me, 40), `+${pts} ${lead ? 'за передовика' : 'за толчок'}`, myColor(), 1.4, true);
   sfx.coin(); buzz(30);
   renderHud(); sendScore();
 }
@@ -856,7 +864,9 @@ function doAction() {
       if (role === 'host') hostDeliver(m, mySeat, myPid); else net.send({ t: 'deliver', ...m });
       break;
     }
-    case 'deliverNo': say(pendingD ? 'Ждём ответа приёмки' : `Окно ждёт: ${PARTS[urgent.type].name.toLowerCase()}`); break;
+    case 'deliverNo':
+      say(pendingD ? 'Ждём ответа приёмки' : urgent && urgent.by < 0 ? `Окно ждёт: ${PARTS[urgent.type].name.toLowerCase()}` : 'Приёмка закрыта');
+      break;
     case 'vTake': t.m.state = 'idle'; t.m.t = 0; askOwner(o, 'mTake', { i: t.i }, MACHINES[t.m.type].out); break;
     case 'vUnload': { const type = t.m.inputs.pop(); askOwner(o, 'mUnload', { i: t.i, type }, type); break; }
     case 'vFloor': { const f = mirrors[o].f; f.splice(f.indexOf(t.it), 1); askOwner(o, 'floor', { id: t.it.id }, t.it.type); break; }
@@ -951,12 +961,89 @@ function makePuddles() {
     puddles.push({ x: W - x, y: H - y, r: rad, a: 0, seed: Math.random() * 10 });
   }
 }
-function applyEvent(id, t = 0, team = 0) {
+// arg — что выбрал создатель: у погрузчика — откуда и в какую сторону он едет
+function applyEvent(id, t = 0, team = 0, arg = null) {
   const e = EVENTS.find(x => x.id === id);
   if (!e || e.id === 'breakdown') return;
-  evt = { ...e, t, team: team === 1 ? 1 : 0 };
+  evt = { ...e, t, team: team === 1 ? 1 : 0, arg: Array.isArray(arg) ? arg.map(v => +v || 0) : null };
   if (e.id === 'teamBonus') evt.title = evt.short = `Премия ${TEAMS[evt.team].dat}`;
-  if (t === 0) { sfx.alert(); buzz(60); showBanner(evt.title, evt.desc); }
+  if (e.id === 'forklift' && !evt.arg) evt = null;
+  if (evt && t === 0) { sfx.alert(); buzz(60); showBanner(evt.title, evt.desc); }
+}
+// событие кончилось по времени
+function onEvtEnd() {
+  if (evt && evt.id === 'race') showBanner('Гонка смен: ничья', 'Ни одна смена не успела собрать изделие');
+  evt = null;
+}
+// «Гонка смен»: создатель видит, чья смена первой собрала изделие, и объявляет её всем
+function hostRace() {
+  if (!evt.base) return false;
+  const s = matchSeats.find(x => doneOf(x) > (evt.base[x] || 0));
+  if (s === undefined) return false;
+  const m = { t: 'race', team: teamOf(s), by: s };
+  net.send(m);
+  applyRace(m);
+  return true;
+}
+function applyRace(m) {
+  if (evt && evt.id === 'race') evt = null;
+  const team = m.team === 1 ? 1 : 0, by = +m.by;
+  if (!SEAT[by] || !inMatch()) return;
+  if (teamOf(mySeat) === team) {
+    const pts = Math.round(RACE * soloMult() * (1 + 0.15 * up().bonus));
+    score += pts;
+    addText(me.x, over(me, 40), `+${pts}`, myColor(), 1.4, true);
+    showBanner('Ваша смена первая!', `Первое изделие — у ${by === mySeat ? 'вас' : SEAT[by].gen}. Вам +${pts}`, myColor());
+    sfx.done(); buzz(40);
+    renderHud(); sendScore();
+  } else showBanner(`${TEAMS[team].name} первая`, `Первое изделие — у ${SEAT[by].gen}`, colorOf(by));
+}
+
+// ---------- погрузчик: объезжает ленту по кругу. Где он сейчас, каждый считает сам по времени события ----------
+const LIFT = [[T, 2.5 * T], [8 * T, 2.5 * T], [8 * T, 9.5 * T], [T, 9.5 * T]];
+const LIFT_L = 28 * T, LIFT_SPEED = 120;
+function liftAt(s) {
+  s = ((s % LIFT_L) + LIFT_L) % LIFT_L;
+  for (let i = 0; i < 4; i++) {
+    const a = LIFT[i], b = LIFT[(i + 1) % 4], len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (s <= len) return { x: a[0] + (b[0] - a[0]) * s / len, y: a[1] + (b[1] - a[1]) * s / len };
+    s -= len;
+  }
+  return { x: LIFT[0][0], y: LIFT[0][1] };
+}
+// где погрузчик, куда смотрит (a) и насколько проявился (k): появляется и исчезает плавно
+function forklift() {
+  if (!evt || evt.id !== 'forklift' || !evt.arg) return null;
+  const [s0, dir] = evt.arg, s = s0 + dir * LIFT_SPEED * evt.t;
+  const p = liftAt(s), a = liftAt(s - dir * 14), b = liftAt(s + dir * 14);
+  return { x: p.x, y: p.y, a: Math.atan2(b.y - a.y, b.x - a.x), s, k: Math.max(0, Math.min(1, evt.t / 0.6, (evt.dur - evt.t) / 0.4)) };
+}
+// начинает там, где сейчас никого нет
+function liftStart() {
+  const hall = [me, ...others().map(s => peers[s])].filter(q => q && q.scene === 'hall');
+  let best = 0, far = -1;
+  for (let k = 0; k < 8; k++) {
+    const s0 = Math.random() * LIFT_L, p = liftAt(s0);
+    const d = Math.min(Infinity, ...hall.map(q => Math.hypot(q.x - p.x, q.y - p.y)));
+    if (d > far) { far = d; best = s0; }
+  }
+  return [r1(best), Math.random() < 0.5 ? 1 : -1];
+}
+// наехал ли погрузчик на меня — каждый проверяет только себя
+let beepT = 0;
+function liftTick(dt) {
+  const f = forklift();
+  if (!f || me.scene !== 'hall' || state !== 'play') return;
+  const dx = me.x - f.x, dy = me.y - f.y, ca = Math.cos(f.a), sa = Math.sin(f.a);
+  const along = dx * ca + dy * sa, side = -dx * sa + dy * ca;
+  beepT -= dt;
+  if (beepT <= 0 && f.k > 0.5 && Math.hypot(dx, dy) < 3 * T) { beepT = 0.45; sfx.beep(); }
+  if (f.k < 1 || me.guard > 0 || me.stun > 0) return;
+  if (along > -26 - R && along < 32 + R && Math.abs(side) < 16 + R) {
+    // отбрасывает вбок и немного вперёд по ходу
+    const k = side >= 0 ? 1 : -1, nx = -sa * k + ca * 0.5, ny = ca * k + sa * 0.5, d = Math.hypot(nx, ny);
+    getShoved(nx / d, ny / d, 420, -1);
+  }
 }
 function applyBreakdown(type) {
   if (!MACHINES[type]) return;
@@ -972,7 +1059,8 @@ function onRush() {
 function startEvent(forceId) {
   const anyBroken = machines.some(m => m.broken > 0);
   const pool = EVENTS.filter(e => (!e.modes || e.modes.includes(mode)) && e.id !== lastEvtId && !(e.id === 'breakdown' && anyBroken));
-  const e = EVENTS.find(x => x.id === forceId) || pool[Math.floor(Math.random() * pool.length)];
+  let r = Math.random() * pool.reduce((a, e) => a + (e.w || 1), 0);
+  const e = EVENTS.find(x => x.id === forceId) || pool.find(x => (r -= x.w || 1) <= 0) || pool[0];
   lastEvtId = e.id;
   if (e.id === 'breakdown') {
     // ломаются станки, которые нужны в этом раунде
@@ -991,12 +1079,15 @@ function startEvent(forceId) {
     team = ts[0] === ts[1] ? (Math.random() < 0.5 ? 0 : 1) : ts[0] < ts[1] ? 0 : 1;
   }
   if (e.id === 'oil') { makePuddles(); net.send({ t: 'oil', list: puddles.map(packPuddle) }); }
-  net.send({ t: 'evt', id: e.id, team });
-  applyEvent(e.id, 0, team);
+  const arg = e.id === 'forklift' ? liftStart() : null;
+  net.send({ t: 'evt', id: e.id, team, arg });
+  applyEvent(e.id, 0, team, arg);
+  if (e.id === 'race') evt.base = Object.fromEntries(matchSeats.map(s => [s, doneOf(s)]));   // от чего считаем изделия
 }
 function hostEvents() {
   if (evt) {
-    if (evt.t >= evt.dur) { evt = null; net.send({ t: 'evtEnd' }); nextEvtAt = elapsed + 16 + Math.random() * 8; }
+    if (evt.id === 'race' && hostRace()) nextEvtAt = elapsed + 16 + Math.random() * 8;
+    else if (evt.t >= evt.dur) { onEvtEnd(); net.send({ t: 'evtEnd' }); nextEvtAt = elapsed + 16 + Math.random() * 8; }
   } else if (!CALM && elapsed >= nextEvtAt && timeLeft > RUSH_AT + 16) {
     startEvent();
   }
@@ -1279,15 +1370,15 @@ const SPARKS = {
   welder: ['#e8f6ff', '#8fd0ff', '#ffffff'], vulcanizer: ['#ffb15c', '#8a7f78'], molder: ['#9fe0c0', '#e8eef0'],
 };
 function updateMachines(dt) {
-  const here = inOwnWork();
+  const here = inOwnWork(), rate = machRate();
   for (const m of machines) {
     if (m.broken > 0) {
       if (here && Math.random() < dt * 5) { const fp = machFront(m, 0); burst(fp.x + (Math.random() - .5) * 20, fp.y + (Math.random() - .5) * 20, 1, ['#4e544f', '#6d736f'], 25, 1.1, 7); }
       continue;
     }
     if (m.state !== 'work') continue;
-    m.t += dt;
-    if (here && Math.random() < dt * 16) {
+    m.t += dt * rate;
+    if (here && Math.random() < dt * 16 * rate) {
       const fp = machFront(m, m.rect.w === m.rect.h ? 22 : 24);
       burst(fp.x + (Math.random() - .5) * 20, fp.y + (Math.random() - .5) * 20, 1, SPARKS[m.type] || ['#ffe08a', '#c8cdd0'], 130, .35, 2);
     }
@@ -1297,7 +1388,7 @@ function updateMachines(dt) {
   // копии чужих станков идут сами, хозяин поправит при следующей рассылке
   for (const s of others()) {
     const mir = mirrors[s];
-    for (const m of mir.m) if (m.state === 'work' && !m.broken) { m.t += dt; if (m.t >= m.dur) m.state = 'ready'; }
+    for (const m of mir.m) if (m.state === 'work' && !m.broken) { m.t += dt * rate; if (m.t >= m.dur) m.state = 'ready'; }
     if (mir.bd > 0) mir.bd = Math.max(0, mir.bd - dt);
   }
 }
@@ -1356,6 +1447,7 @@ function update(dt) {
     if (role === 'host') hostTick(dt);
     const canMove = state === 'play';
     updatePlayer(me, dt, canMove);
+    liftTick(dt);
     if (canMove) checkDoors();
     if (state === 'play') { while (actionQueue.length) { actionQueue.shift(); doAction(); } }
     else actionQueue.length = 0;
@@ -1388,7 +1480,7 @@ const SERVER = serverMeta ? serverMeta.content : `${location.protocol === 'https
 // приглашение ведёт на сайт игры: с itch.io — на workers.dev, там вход по ссылке сразу в комнату
 const SITE = serverMeta ? SERVER.replace(/^ws/, 'http') + '/' : location.origin + location.pathname;
 // версия сетевых сообщений: игра есть и на своём сайте, и на itch.io — разные версии в одну комнату не пускаем
-const VERSION = 3;
+const VERSION = 4;
 let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
@@ -1586,7 +1678,7 @@ function syncMsg(to) {
   return {
     t: 'sync', to, state: state === 'menu' || state === 'wait' ? 'lobby' : state, resumeTo, rounds, duration, round, seed: roundSeed,
     seats: matchSeats, roster, mode, tl: r1(timeLeft), ph: r1(phase), el: r1(elapsed), count: r1(countT), rush,
-    evt: evt && { id: evt.id, t: r1(evt.t), team: evt.team }, tally, result: lastResultMsg, ready,
+    evt: evt && { id: evt.id, t: r1(evt.t), team: evt.team, arg: evt.arg }, tally, result: lastResultMsg, ready,
     urgent: urgent && urgent.by < 0 ? { id: urgent.id, type: urgent.type, pts: urgent.pts, dur: urgent.dur, t: r1(urgent.t) } : null,
     belt: belt.map(packItem), floor: hallFloor.map(packFloor), puddles: puddles.map(packPuddle),
   };
@@ -1612,7 +1704,7 @@ function applySync(m) {
   puddles = (m.puddles || []).map(o => unpackPuddle(o, oil ? 1 : 0));
   phase = +m.ph || 0; timeLeft = +m.tl || 0; elapsed = +m.el || 0; rush = !!m.rush; countT = +m.count || 0;
   evt = null;
-  if (m.evt) applyEvent(m.evt.id, +m.evt.t || 0.01, m.evt.team);
+  if (m.evt) applyEvent(m.evt.id, +m.evt.t || 0.01, m.evt.team, m.evt.arg);
   urgent = null;
   if (m.urgent) applyUrgent(m.urgent, +m.urgent.t || 0.01);
   if (m.tally) tally = m.tally;
@@ -1723,13 +1815,14 @@ function onNet(m, from) {
     case 'take': if (role === 'host') hostTake(m.id, fs, from); break;
     case 'gone': if (fromHost) onGone(m); break;
     case 'deny': if (fromHost && m.to === myPid) onDeny(m.id); break;
-    case 'evt': if (fromHost) applyEvent(m.id, 0, m.team); break;
+    case 'evt': if (fromHost) applyEvent(m.id, 0, m.team, m.arg); break;
+    case 'race': if (fromHost) applyRace(m); break;
     case 'urgent': if (fromHost && inMatch()) applyUrgent(m); break;
     case 'urgentEnd': if (fromHost) applyUrgentEnd(m); break;
     case 'deliver': if (role === 'host') hostDeliver(m, fs, from); break;
     case 'dres': if (fromHost && m.to === myPid) onDeliverDenied(String(m.rid)); break;
-    case 'bounty': if (m.to === myPid && fs >= 0) onBounty(m.pts); break;
-    case 'evtEnd': if (fromHost) evt = null; break;
+    case 'bounty': if (m.to === myPid && fs >= 0) onBounty(m.pts, m.lead); break;
+    case 'evtEnd': if (fromHost) onEvtEnd(); break;
     case 'oil': if (fromHost && Array.isArray(m.list)) puddles = m.list.map(o => unpackPuddle(o)); break;
     case 'brk': if (fromHost && inMatch()) applyBreakdown(m.type); break;
     case 'rush': if (fromHost && !rush) { rush = true; onRush(); } break;
@@ -2135,9 +2228,10 @@ function drawScenePlayers() {
   const list = scenePlayers(), lead = leaderSeat();
   const flipped = viewFlipped();
   list.sort((a, b) => flipped ? b.y - a.y : a.y - b.y);
+  const carts = evt && evt.id === 'carts';
   for (const p of list) {
-    if (p === me) drawPlayer(me, myColor(), darkOf(mySeat), up().cap > 0, mySeat === lead);
-    else drawPlayer(p, colorOf(p.seat), darkOf(p.seat), p.hands.length > 1, p.seat === lead);
+    if (p === me) drawPlayer(me, myColor(), darkOf(mySeat), up().cap > 0 || carts, mySeat === lead);
+    else drawPlayer(p, colorOf(p.seat), darkOf(p.seat), p.hands.length > 1 || carts, p.seat === lead);
   }
 }
 // окна приёмки: закрыты, пока нет срочного заказа; открыто — видно, что ждут и сколько дадут
@@ -2162,6 +2256,75 @@ function drawWindows() {
     g.restore();
   }
 }
+// погрузчик и разметка его полосы на полу; смотрит вперёд по оси x
+function drawLiftLane() {
+  const f = forklift();
+  if (!f) return;
+  g.save();
+  g.globalAlpha = 0.4 * f.k;
+  g.strokeStyle = C.hazard; g.lineWidth = 2; g.setLineDash([10, 8]); g.lineDashOffset = -f.s;
+  for (const d of [-22, 22]) g.strokeRect(T - d, 2.5 * T - d, 7 * T + 2 * d, 7 * T + 2 * d);
+  g.restore();
+}
+function drawForklift() {
+  const f = forklift();
+  if (!f) return;
+  g.save();
+  g.globalAlpha = f.k;
+  g.translate(f.x, f.y); g.rotate(f.a);
+  g.fillStyle = 'rgba(0,0,0,.3)'; rr(g, -23, -14, 58, 33, 6); g.fill();
+  g.fillStyle = '#151718';
+  for (const x of [-18, 4]) for (const y of [-17, 12]) { rr(g, x - 6, y, 12, 5, 2); g.fill(); }
+  g.fillStyle = '#9aa3a8'; g.fillRect(16, -12, 17, 5); g.fillRect(16, 7, 17, 5);   // вилы
+  g.fillStyle = '#4a5156'; g.fillRect(11, -15, 6, 30);                             // мачта
+  rr(g, -25, -14, 38, 28, 6); g.fillStyle = '#e2b52c'; g.fill();
+  g.strokeStyle = '#6f5a1f'; g.lineWidth = 1.5; g.stroke();
+  hazard(g, -25, -11, 7, 22);                                                       // противовес сзади
+  rr(g, -13, -10, 19, 20, 3); g.fillStyle = '#2a2f2c'; g.fill();                    // кабина под решёткой
+  g.strokeStyle = 'rgba(255,255,255,.22)'; g.lineWidth = 1;
+  for (let x = -9; x <= 3; x += 4) { g.beginPath(); g.moveTo(x, -10); g.lineTo(x, 10); g.stroke(); }
+  const on = Math.floor(clock * 6) % 2 === 0;
+  if (on) dot(g, -4, 0, 9, 'rgba(255,154,61,.28)');
+  dot(g, -4, 0, 3.4, on ? '#ff9a3d' : '#8a4a1d');                                  // мигалка
+  g.restore();
+}
+// «Ящики без наклеек»: вместо детали на ленте — коробка с вопросом
+function drawCrate(x, y) {
+  g.save();
+  g.translate(x, y);
+  g.fillStyle = 'rgba(0,0,0,.28)'; g.beginPath(); g.ellipse(1.5, 4, 12, 8, 0, 0, PI * 2); g.fill();
+  rr(g, -11, -11, 22, 22, 2.5); g.fillStyle = '#b48a55'; g.fill();
+  g.strokeStyle = '#6e4f2a'; g.lineWidth = 1.3; g.stroke();
+  g.fillStyle = 'rgba(236,222,186,.6)'; g.fillRect(-11, -2.5, 22, 5);   // скотч
+  if (viewFlipped()) g.rotate(PI);
+  g.fillStyle = '#3b2a16'; g.font = '14px ' + FONT_D; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('?', 0, 1);
+  g.restore();
+}
+// «Свет погас»: в цехе темно, светло только вокруг игроков, у дверей, окон приёмки и часов
+const darkCv = document.createElement('canvas');
+darkCv.width = W; darkCv.height = H;
+const dk = darkCv.getContext('2d');
+function drawDark() {
+  if (!evt || evt.id !== 'dark') return;
+  const k = Math.max(0, Math.min(1, evt.t / 0.5, (evt.dur - evt.t) / 0.5));
+  if (k <= 0) return;
+  dk.globalCompositeOperation = 'source-over';
+  dk.clearRect(0, 0, W, H);
+  dk.fillStyle = `rgba(6,8,7,${0.94 * k})`; dk.fillRect(0, 0, W, H);
+  dk.globalCompositeOperation = 'destination-out';
+  const light = (x, y, r) => {
+    const gr = dk.createRadialGradient(x, y, r * 0.35, x, y, r);
+    gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    dk.fillStyle = gr; dk.fillRect(x - r, y - r, 2 * r, 2 * r);
+  };
+  light(me.x, me.y, 2.6 * T);
+  for (const q of scenePlayers()) if (q !== me) light(q.x, q.y, 1.2 * T);
+  for (const s of matchSeats) light((DOORS[s].c + 1) * T, (DOORS[s].r + 0.5) * T, 0.9 * T);
+  if (urgent && urgent.by < 0) for (const w of WINDOWS) light(w.x + w.w / 2, w.y + w.h / 2, 1.3 * T);
+  light(4.5 * T, 6 * T, 0.75 * T);
+  g.drawImage(darkCv, 0, 0, W, H);
+}
 // «Пропускной режим»: двери соперников перегорожены
 function drawShutDoors() {
   if (!evt || evt.id !== 'guard') return;
@@ -2178,17 +2341,21 @@ function drawHall() {
   drawWindows();
   drawShutDoors();
   drawPuddles();
+  drawLiftLane();
   drawBelt();
   g.save(); g.setTransform(scale, 0, 0, scale, 0, 0); drawDial(); g.restore();
   for (const it of hallFloor) {
     const a = it.age > 21 && Math.floor(it.age * 6) % 2 === 0 ? 0.35 : 1;
     drawItem(g, it.type, it.x, it.y, 1, a, true);
   }
-  for (const it of belt) { const q = pathPos(beltS(it)); drawItem(g, it.type, q.x, q.y, 1, 1, true); }
+  const crates = evt && evt.id === 'mystery';
+  for (const it of belt) { const q = pathPos(beltS(it)); if (crates) drawCrate(q.x, q.y); else drawItem(g, it.type, q.x, q.y, 1, 1, true); }
   me.target = state === 'play' && me.stun <= 0 ? findTarget(me) : null;
   drawTarget();
   drawScenePlayers();
+  drawForklift();
   drawSparks();
+  drawDark();
   drawTexts();
 }
 function drawWork() {
@@ -2320,7 +2487,7 @@ function renderWorkbox() {
     if (live) {
       if (m.broken > 0) { cls = 'broken'; txt = 'поломка — почините'; }
       else if (m.state === 'ready') { cls = 'ready'; txt = `готово: ${PARTS[def.out].name.toLowerCase()}`; }
-      else if (m.state === 'work') { cls = 'work'; txt = `работает · ${Math.max(1, Math.ceil(m.dur - m.t))} с`; }
+      else if (m.state === 'work') { cls = 'work'; txt = `работает · ${Math.max(1, Math.ceil((m.dur - m.t) / machRate()))} с`; }
       else if (m.inputs.length) txt = `загружено ${m.inputs.length} из ${def.in.length}`;
       else if (roundMade.includes(def.out)) txt = `ждёт: ${def.in.map(k => PARTS[k].name.toLowerCase()).join(' + ')}`;
       else { cls = 'off'; txt = 'в этом раунде не пригодится'; }
@@ -2807,6 +2974,12 @@ if (DEBUG) {
     event: id => { if (role === 'host') { evt = null; startEvent(id); } },
     urgentNow: type => { if (role === 'host' && state === 'play') { if (urgent) endUrgent(-1, ''); startUrgent(type); } },
     target: () => { const t = findTarget(me); return t && t.kind; },
+    get cap() { return capOf(); }, forklift, liftAhead: d => { const f = forklift(); return f && liftAt(f.s + evt.arg[1] * d); },
+    // цвет точки цеха на экране — для проверки темноты и ящиков
+    pixel(x, y) {
+      const fl = viewFlipped(), px = Math.round((fl ? W - x : x) * scale), py = Math.round((fl ? H - y : y) * scale);
+      return [...g.getImageData(px, py, 1, 1).data.slice(0, 3)];
+    },
     place(x, y, fx = 0, fy = -1) { Object.assign(me, { x, y, fx, fy, vx: 0, vy: 0, kx: 0, ky: 0 }); },
   };
 }
