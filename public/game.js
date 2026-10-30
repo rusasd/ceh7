@@ -149,7 +149,13 @@ let urgent = null, urgentAt = 0, urgentSeq = 0, pendingD = null;
 let boiler = null, boilerAt = 0, boilerSeq = 0, shake = 0, booms = [], soot = {}, hissT = 0;
 
 function newWallet() { return { coins: 0, up: Object.fromEntries(UPGRADES.map(u => [u.id, 0])) }; }
-function newTally() { return { total: [0, 0, 0, 0], wins: [0, 0, 0, 0], done: [0, 0, 0, 0] }; }
+function newTally() { return { total: [0, 0, 0, 0], wins: [0, 0, 0, 0], done: [0, 0, 0, 0], st: [0, 1, 2, 3].map(newStats) }; }
+// для медалей: что каждый натворил за раунд — создатель складывает за матч
+// (функция, а не список ключей: newTally() вызывается выше по файлу, раньше, чем объявлены константы)
+function newStats() { return { steal: 0, shove: 0, fix: 0, urgent: 0, pass: 0, boom: 0, fall: 0 }; }
+const STAT_KEYS = Object.keys(newStats());
+const cleanStats = o => Object.fromEntries(STAT_KEYS.map(k => [k, Math.max(0, Math.min(999, Math.floor(+(o && o[k]) || 0)))]));
+let stats = newStats();
 const up = () => wallet.up;
 const capOf = () => 1 + wallet.up.cap + (evt && evt.id === 'carts' ? 1 : 0);   // «Выдали тележки» — на деталь больше
 const colorOf = s => SEAT[s] ? SEAT[s].main : C.ink;
@@ -159,6 +165,12 @@ const newId = () => mySeat + 'k' + (++idSeq).toString(36);
 const newCode = () => String(1000 + Math.floor(Math.random() * 9000));
 const seatOf = pid => { const e = roster.find(x => x.pid === pid); return e ? e.seat : -1; };
 const pidOf = s => { const e = roster.find(x => x.seat === s); return e ? e.pid : ''; };
+// имя игрока: своё, если задал, иначе цвет. Мастерские по-прежнему называем по цвету двери
+const cleanName = v => String(v || '').replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 12);
+const nameOf = s => { const e = roster.find(x => x.seat === s); return e && e.name ? e.name : ''; };
+const who = s => nameOf(s) || (SEAT[s] ? SEAT[s].name : '');
+let myName = '';
+try { myName = cleanName(localStorage.getItem('ceh7-name')); } catch (e) {}
 const isOn = s => s === mySeat || online.has(pidOf(s));
 const hostOnline = () => role === 'host' || online.has(hostPid);
 const inMatch = () => matchSeats.includes(mySeat);
@@ -396,6 +408,23 @@ function say(msg) {
   sfx.nope();
 }
 function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
+// ---------- быстрые фразы над головой ----------
+const PHRASES = ['Отдай!', 'Спасибо!', 'Бегу!', 'Ха-ха!', 'Помогите!', 'Сюда!', 'Не трогай!', 'Ну всё…'];
+const bubbles = {};   // место → { i, t }: какая фраза и сколько уже висит
+let sayCd = 0;
+function sayPhrase(i) {
+  if (!PHRASES[i] || !inMatch() || !['count', 'play', 'roundover'].includes(state) || sayCd > 0) return;
+  sayCd = 1.2;
+  bubbles[mySeat] = { i, t: 0 };
+  net.send({ t: 'say', i });
+  sfx.blip();
+}
+function onSay(s, i) {
+  i = Math.floor(+i);
+  if (!PHRASES[i] || s === mySeat || !matchSeats.includes(s)) return;
+  bubbles[s] = { i, t: 0 };
+  sfx.blip();
+}
 function showBanner(title, desc, color = C.hazard) { banner = { title, desc, color, t: 0, life: 2.8 }; }
 
 // ---------- звук ----------
@@ -451,6 +480,8 @@ const sfx = {
   whistle:() => { tone(880, .35, 'sine', .045, 700); tone(1320, .25, 'sine', .03, 400, .12); },
   hiss:   () => tone(1900, .04, 'square', .018, -500),
   boom:   () => { noise(.7, .22); tone(110, .5, 'sawtooth', .08, -70); tone(70, .7, 'square', .06, -40, .03); },
+  blip:   () => { tone(1320, .05, 'sine', .035); tone(1760, .07, 'sine', .03, 0, .05); },
+  meow:   () => { tone(700, .16, 'triangle', .06, 320); tone(1000, .26, 'triangle', .05, -480, .14); },
 };
 
 // ---------- ввод ----------
@@ -469,6 +500,7 @@ function readInput() {
   let x = (on(KEYS.right) ? 1 : 0) - (on(KEYS.left) ? 1 : 0);
   let y = (on(KEYS.down) ? 1 : 0) - (on(KEYS.up) ? 1 : 0);
   if (!x && !y && Math.hypot(touchVec.x, touchVec.y) >= 0.18) { x = touchVec.x; y = touchVec.y; }
+  if (evt && evt.id === 'mixup') { x = -x; y = -y; }   // «Провода перепутались»
   // цех развёрнут: «вверх» на экране — это вниз по цеху
   return viewFlipped() ? { x: -x, y: -y } : { x, y };
 }
@@ -478,6 +510,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Escape' || e.code === 'KeyP') { if (state === 'pause') resumeGame(true); else pauseGame(true); return; }
   if (e.repeat) return;
   if (e.code === 'KeyF') { toggleFull(); return; }
+  if (/^Digit[1-8]$/.test(e.code)) { sayPhrase(+e.code.slice(5) - 1); return; }
   keys.add(e.code);
   if (KEYS.act.includes(e.code)) queueAction();
 });
@@ -530,6 +563,21 @@ function setupAct(btn) {
 }
 setupStick($('zone'));
 setupAct($('act'));
+// панель фраз: кнопка в углу джойстика его не трогает; фраза — и панель закрылась; тап мимо — тоже закрылась
+const sayPanel = $('sayPanel'), btnSay = $('btnSay');
+PHRASES.forEach((ph, i) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  const k = document.createElement('kbd'); k.textContent = i + 1;   // видно на компьютере
+  b.append(k, ph);
+  b.addEventListener('click', () => { sayPhrase(i); sayPanel.hidden = true; });
+  sayPanel.appendChild(b);
+});
+btnSay.addEventListener('pointerdown', e => e.stopPropagation());
+btnSay.addEventListener('click', e => { e.currentTarget.blur(); ensureAudio(); sayPanel.hidden = !sayPanel.hidden; });
+document.addEventListener('pointerdown', e => {
+  if (!sayPanel.hidden && !sayPanel.contains(e.target) && !btnSay.contains(e.target)) sayPanel.hidden = true;
+}, true);
 
 // ---------- движение ----------
 function collideTiles(p) {
@@ -591,7 +639,7 @@ function enterScene(scene, s) {
   me.target = null; sparks = []; texts = []; fade = 1;
   sfx.door();
   if (scene !== 'hall' && isMate(s)) showBanner('Мастерская напарника', 'Станки и верстак здесь общие для вашей смены', colorOf(s));
-  else if (scene !== 'hall' && s !== mySeat) showBanner(`Мастерская: ${SEAT[s].name}`, 'Можно утащить детали с пола и готовое из станков', colorOf(s));
+  else if (scene !== 'hall' && s !== mySeat) showBanner(`Мастерская: ${who(s)}`, 'Можно утащить детали с пола и готовое из станков', colorOf(s));
   sendState(true);
 }
 // других двигаем плавно к последней присланной точке
@@ -643,6 +691,8 @@ function findTarget(p) {
       const cs = pathClosest(ix, iy);
       take(cs.d, 30, { kind:'beltPut', s:cs.s, x:cs.x, y:cs.y }, 14);
     }
+    const c = cat();
+    if (c && c.k >= 1) take(Math.hypot(c.x - ix, c.y - iy), 30, { kind:'shoo', x:c.x, y:c.y });
     // окна приёмки срочных заказов — посреди верхней и нижней стены. У закрытого окна деталь не роняем:
     // кто нажал на миг позже, чем заказ закрылся, услышит «Приёмка закрыта»
     if (holding && urgentOn()) {
@@ -747,6 +797,7 @@ function dropItem(type, x, y) {
 function doShove(q) {
   const force = 300 * (1 + 0.3 * up().elbow) * (boilerOn() ? 1.4 : 1);
   me.shoveCd = 1.6 * (1 - 0.3 * up().elbow);
+  stats.shove++;
   q.guard = 0.9 + GUARD;   // не толкать второй раз, пока не встал
   burst(q.x, q.y, 10, ['#d8d2c0', '#a9a291'], 130, .4, 3);
   sfx.shove(); buzz(30);
@@ -755,6 +806,7 @@ function doShove(q) {
 // меня толкнули: устойчивость и защита после оглушения считаются у меня
 function getShoved(dx, dy, force, by) {
   if (me.guard > 0) return;
+  stats.fall++;
   const arm = up().armor;
   force *= arm ? 0.7 : 1;
   me.kx = dx * force; me.ky = dy * force;
@@ -874,7 +926,7 @@ function doAction() {
       const m = t.m, fp = machFront(m, 18), n = up().kit ? 2 : 1;
       m.broken = Math.max(0, m.broken - n); sfx.clank();
       burst(fp.x, fp.y, 6, ['#ffd27a', '#ffffff'], 120, .35, 2.5);
-      if (m.broken === 0) { sfx.fixed(); addText(fp.x, over(p, 36), 'Починено!', '#7be39a', 1.2); }
+      if (m.broken === 0) { sfx.fixed(); addText(fp.x, over(p, 36), 'Починено!', '#7be39a', 1.2); stats.fix++; }
       if (t.o === mySeat) wsDirty = true; else askOwner(t.o, 'fix', { i: t.i, n });
       break;
     }
@@ -924,6 +976,7 @@ function doAction() {
       break;
     }
     case 'shove': doShove(t.q); break;
+    case 'shoo': if (role === 'host') hostShoo(mySeat); else net.send({ t: 'shoo' }); break;
   }
   sendState(true);
 }
@@ -1003,8 +1056,8 @@ function applyEvent(id, t = 0, team = 0, arg = null) {
   if (!e || e.id === 'breakdown') return;
   evt = { ...e, t, team: team === 1 ? 1 : 0, arg: Array.isArray(arg) ? arg.map(v => +v || 0) : null };
   if (e.id === 'teamBonus') evt.title = evt.short = `Премия ${TEAMS[evt.team].dat}`;
-  if (e.id === 'forklift' && !evt.arg) evt = null;
-  if (evt && t === 0) { sfx.alert(); buzz(60); showBanner(evt.title, evt.desc); }
+  if ((e.id === 'forklift' || e.id === 'cat') && !evt.arg) evt = null;
+  if (evt && t === 0) { sfx.alert(); buzz(60); showBanner(evt.title, evt.desc); if (e.id === 'cat') sfx.meow(); }
 }
 // событие кончилось по времени
 function onEvtEnd() {
@@ -1029,10 +1082,10 @@ function applyRace(m) {
     const pts = Math.round(RACE * soloMult() * (1 + 0.15 * up().bonus));
     score += pts;
     addText(me.x, over(me, 40), `+${pts}`, myColor(), 1.4, true);
-    showBanner('Ваша смена первая!', `Первое изделие — у ${by === mySeat ? 'вас' : SEAT[by].gen}. Вам +${pts}`, myColor());
+    showBanner('Ваша смена первая!', `${by === mySeat ? 'Первое изделие — ваше' : `Первое изделие: ${who(by)}`}. Вам +${pts}`, myColor());
     sfx.done(); buzz(40);
     renderHud(); sendScore();
-  } else showBanner(`${TEAMS[team].name} первая`, `Первое изделие — у ${SEAT[by].gen}`, colorOf(by));
+  } else showBanner(`${TEAMS[team].name} первая`, `Первое изделие: ${who(by)}`, colorOf(by));
 }
 
 // ---------- погрузчик: объезжает ленту по кругу. Где он сейчас, каждый считает сам по времени события ----------
@@ -1081,6 +1134,85 @@ function liftTick(dt) {
     getShoved(nx / d, ny / d, 420, -1);
   }
 }
+
+// ---------- кот: бегает по ленте и роняет детали на пол. Роняет создатель, где кот — каждый считает сам ----------
+const CAT_SPEED = 130, SHOO = 10;
+function cat() {
+  if (!evt || evt.id !== 'cat' || !evt.arg) return null;
+  const [s0, dir] = evt.arg, s = wrapS(s0 + dir * CAT_SPEED * evt.t);
+  const p = pathPos(s), a = pathPos(s - dir * 8), b = pathPos(s + dir * 8);
+  return { x: p.x, y: p.y, s, a: Math.atan2(b.y - a.y, b.x - a.x), k: Math.max(0, Math.min(1, evt.t / 0.5, (evt.dur - evt.t) / 0.5)) };
+}
+// куда падает сброшенная деталь: с ленты наружу, на пол цеха
+function catDrop(q) {
+  const dx = q.x - 4.5 * T, dy = q.y - 6 * T;
+  let x = q.x, y = q.y;
+  if (Math.abs(dy) / 1.5 >= Math.abs(dx) / 2) y += Math.sign(dy) * 1.1 * T; else x += Math.sign(dx) * 1.1 * T;
+  return { x: x + (Math.random() - .5) * 14, y: y + (Math.random() - .5) * 14 };
+}
+function hostCat() {
+  const c = cat();
+  if (!c || c.k < 1) return;
+  if (!evt.seen) evt.seen = new Set();
+  for (let i = belt.length - 1; i >= 0; i--) {
+    const it = belt[i];
+    if (evt.seen.has(it.id) || pathGap(beltS(it), c.s) > 14) continue;
+    evt.seen.add(it.id);
+    if (Math.random() > 0.6) continue;   // через некоторые перепрыгивает
+    const d = catDrop(pathPos(beltS(it)));
+    belt.splice(i, 1);
+    // тот же номер детали: кто успел схватить её с ленты, получит её и с пола
+    const f = { id: it.id, type: it.type, x: r1(d.x), y: r1(d.y), age: 0 };
+    hallFloor.push(f);
+    net.send({ t: 'gone', id: it.id, by: -1 });
+    net.send({ t: 'floor', id: f.id, type: f.type, x: f.x, y: f.y });
+  }
+}
+// «Брысь!»: кто первым прогнал кота, тому очки
+function hostShoo(s) {
+  if (!evt || evt.id !== 'cat' || state !== 'play' || !matchSeats.includes(s)) return;
+  const m = { t: 'shooed', by: s };
+  net.send(m);
+  applyShooed(m);
+  nextEvtAt = elapsed + evtGap();
+}
+function applyShooed(m) {
+  const c = cat(), by = +m.by;
+  if (!c) return;
+  evt = null;
+  if (me.scene === 'hall') {
+    burst(c.x, c.y, 14, ['#e08a35', '#f4d2a8'], 160, .6, 3);
+    addText(c.x, c.y + (viewFlipped() ? 22 : -22), 'Мяу!', '#f4d2a8', 1.2, true);
+  }
+  sfx.meow();
+  if (by === mySeat && inMatch()) {
+    score += SHOO;
+    addText(me.x, over(me, 40), `+${SHOO}`, myColor(), 1.3, true);
+    showBanner('Кот убежал!', `Вы прогнали кота: +${SHOO}`, myColor());
+    renderHud(); sendScore();
+  } else if (SEAT[by]) showBanner('Кот убежал!', `Кота спугнули: ${who(by)} +${SHOO}`, colorOf(by));
+}
+function drawCat() {
+  const c = cat();
+  if (!c) return;
+  const run = Math.sin(clock * 22);
+  g.save();
+  g.globalAlpha = c.k;
+  g.translate(c.x, c.y); g.rotate(c.a); g.scale(1.25, 1.25);
+  g.fillStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.ellipse(1, 3, 15, 8, 0, 0, PI * 2); g.fill();
+  g.strokeStyle = '#c96f22'; g.lineWidth = 4; g.lineCap = 'round';   // хвост
+  g.beginPath(); g.moveTo(-10, 0); g.quadraticCurveTo(-18, run * 7, -24, run * 3); g.stroke();
+  for (const [x, y, ph] of [[7, -6, 1], [7, 6, -1], [-6, -6, -1], [-6, 6, 1]]) dot(g, x + run * 3 * ph, y, 2.8, '#b5621d');   // лапы
+  g.beginPath(); g.ellipse(0, 0, 12, 7, 0, 0, PI * 2); g.fillStyle = '#e08a35'; g.fill();
+  g.strokeStyle = 'rgba(140,70,20,.6)'; g.lineWidth = 1.6;
+  for (const x of [-6, -1, 4]) { g.beginPath(); g.moveTo(x, -6); g.lineTo(x + 1, 6); g.stroke(); }
+  g.fillStyle = '#e08a35';
+  for (const k of [-1, 1]) { g.beginPath(); g.moveTo(10, 4 * k); g.lineTo(13, 10 * k); g.lineTo(16, 4 * k); g.closePath(); g.fill(); }   // уши
+  dot(g, 14, 0, 6.5, '#e08a35');
+  dot(g, 17, -2.4, 1.2, '#1b1d18'); dot(g, 17, 2.4, 1.2, '#1b1d18');
+  dot(g, 20, 0, 1.3, '#f19bb0');
+  g.restore();
+}
 function applyBreakdown(type) {
   if (!MACHINES[type]) return;
   machines.forEach(m => { if (m.type === type) m.broken = 4; });
@@ -1115,7 +1247,7 @@ function startEvent(forceId) {
     team = ts[0] === ts[1] ? (Math.random() < 0.5 ? 0 : 1) : ts[0] < ts[1] ? 0 : 1;
   }
   if (e.id === 'oil') { makePuddles(); net.send({ t: 'oil', list: puddles.map(packPuddle) }); }
-  const arg = e.id === 'forklift' ? liftStart() : null;
+  const arg = e.id === 'forklift' ? liftStart() : e.id === 'cat' ? [r1(Math.random() * L), Math.random() < 0.5 ? 1 : -1] : null;
   net.send({ t: 'evt', id: e.id, team, arg });
   applyEvent(e.id, 0, team, arg);
   if (e.id === 'race') evt.base = Object.fromEntries(matchSeats.map(s => [s, doneOf(s)]));   // от чего считаем изделия
@@ -1166,13 +1298,14 @@ function applyUrgentEnd(m) {
   urgent = null;
   if (by === mySeat && pendingD && pendingD.rid === m.rid) {
     const pts = Math.round(u.pts * soloMult() * (1 + 0.15 * up().bonus));
+    stats.urgent++;
     score += pts; pendingD = null;
     addText(me.x, over(me, 40), `+${pts}`, myColor(), 1.4, true);
     showBanner('Срочный заказ ваш!', `Вы успели раньше всех — +${pts}`, myColor());
     sfx.done(); buzz(40);
     renderHud(); sendScore();
   } else if (by >= 0 && by !== mySeat) {
-    showBanner('Срочный заказ закрыт', `Премия у ${SEAT[by].gen}${teamsOn() ? ` · ${TEAMS[teamOf(by)].short} смена` : ''}`, colorOf(by));
+    showBanner('Срочный заказ закрыт', `Премия: ${who(by)}${teamsOn() ? ` · ${TEAMS[teamOf(by)].short} смена` : ''}`, colorOf(by));
   } else if (by < 0) showBanner('Срочный заказ сорвался', 'Никто не успел принести деталь', C.alarm);
 }
 function onDeliverDenied(rid) {
@@ -1222,8 +1355,9 @@ function applyBoiler(m) {
     showBanner(fresh ? 'Вам котёл!' : 'Котёл у вас!', 'Толкните кого-нибудь, пока не рвануло', C.alarm);
     sfx.whistle(); buzz(80);
     sendState(true);
-  } else if (fresh) showBanner(`Котёл у ${SEAT[h].gen}`, 'Не подпускайте: толчком котёл переходит', colorOf(h));
+  } else if (fresh) showBanner(`${who(h)} с котлом`, 'Не подпускайте: толчком котёл переходит', colorOf(h));
   // кто передал, видит «Держи!» над тем, кому достался котёл
+  if (!fresh && boiler.from === mySeat && h !== mySeat) stats.pass++;
   if (!fresh && boiler.from === mySeat && h !== mySeat) { const q = peers[h]; if (q && q.here && q.scene === me.scene) addText(q.x, over(q, 34), 'Держи!', myColor(), 1.2, true); }
   renderHud();
 }
@@ -1249,6 +1383,7 @@ function applyBoom(m) {
     }
   }
   if (h === mySeat) {
+    stats.boom++;
     const pts = Math.round(score * BOOM_CUT);
     score -= pts;
     me.stun = 1.6; me.guard = me.stun + GUARD;
@@ -1257,7 +1392,7 @@ function applyBoom(m) {
     buzz(250);
     renderHud(); sendScore(); sendState(true);
   } else {
-    showBanner('БАХ!', `Котёл рванул у ${SEAT[h].gen}`, colorOf(h));
+    showBanner('БАХ!', `Котёл рванул — ${who(h)} в саже`, colorOf(h));
     renderHud();
   }
   sfx.boom();
@@ -1362,6 +1497,7 @@ function onWRes(m) {
   const p = pendingW.get(m.rid);
   if (!p) return;
   pendingW.delete(m.rid);
+  if (m.ok && ['floor', 'mTake', 'mUnload'].includes(p.kind) && rivals(mySeat, p.o)) stats.steal++;   // утащил у соперника
   if (!m.ok) undoAsk(p, p.give);
   else if (Array.isArray(m.back) && m.back.length) undoAsk({}, m.back.filter(t => t in PARTS));
 }
@@ -1389,7 +1525,7 @@ function startRoundLocal(n, seed) {
   round = n; roundSeed = seed;
   roundParts();
   urgent = null; pendingD = null; urgentAt = mode === 'teams' ? 24 + Math.random() * 8 : 14 + Math.random() * 6;
-  orderRng = mulberry32(seed); orderSeq = []; done = 0; score = 0;
+  orderRng = mulberry32(seed); orderSeq = []; done = 0; score = 0; stats = newStats();
   machines.forEach(m => { m.state = 'idle'; m.t = 0; m.dur = 1; m.inputs = []; m.broken = 0; });
   for (const mir of mirrors) { mir.m = newMachines(); mir.f = []; mir.ord = null; mir.bd = 0; }
   bench.doneT = 0; workFloor = []; hallFloor = []; puddles = []; belt = []; phase = 0;
@@ -1431,7 +1567,7 @@ function guestEndRound() {
   state = 'roundover'; timeLeft = 0; rush = false; evt = null; banner = null; actionQueue.length = 0;
   urgent = null; pendingD = null; boiler = null;
   hideOverlays();
-  net.send({ t: 'final', s: score, d: done });
+  net.send({ t: 'final', s: score, d: done, st: stats });
   sfx.end(); buzz(80);
 }
 function hostFinishRound() {
@@ -1442,6 +1578,10 @@ function hostFinishRound() {
     if (st === mySeat) { s[st] = score; d[st] = done; continue; }
     const f = finals[st] || (peers[st] ? { s: peers[st].score, d: peers[st].done } : { s: 0, d: 0 });
     s[st] = f.s; d[st] = f.d;
+  }
+  for (const st of seats) {
+    const add = st === mySeat ? stats : finals[st] && finals[st].st;
+    if (add) for (const k of STAT_KEYS) tally.st[st][k] += add[k];
   }
   let ts = null;
   if (teamsOn()) {
@@ -1547,6 +1687,7 @@ function hostTick(dt) {
     hostEvents();
     hostUrgent();
     hostBoiler();
+    hostCat();
     if (!rush && timeLeft <= RUSH_AT) { rush = true; net.send({ t: 'rush' }); onRush(); }
   } else if (state === 'roundover' && finalWait > 0) {
     finalWait -= dt;
@@ -1604,6 +1745,8 @@ function update(dt) {
   if (wsDirty && clock - wsT > 0.1 && inMatch() && matchState()) { wsDirty = false; wsT = clock; net.send(wsMsg()); }
   if (goT > 0) goT -= dt;
   boilerFx(dt);
+  sayCd = Math.max(0, sayCd - dt);
+  for (const s in bubbles) { bubbles[s].t += dt; if (bubbles[s].t > 2.6) delete bubbles[s]; }
   if (banner) { banner.t += dt; if (banner.t >= banner.life) banner = null; }
   for (let i = sparks.length - 1; i >= 0; i--) {
     const s = sparks[i];
@@ -1622,7 +1765,7 @@ const SERVER = serverMeta ? serverMeta.content : `${location.protocol === 'https
 // приглашение ведёт на сайт игры: с itch.io — на workers.dev, там вход по ссылке сразу в комнату
 const SITE = serverMeta ? SERVER.replace(/^ws/, 'http') + '/' : location.origin + location.pathname;
 // версия сетевых сообщений: игра есть и на своём сайте, и на itch.io — разные версии в одну комнату не пускаем
-const VERSION = 5;
+const VERSION = 6;
 let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
@@ -1740,7 +1883,7 @@ function onPeerState(s, m) {
   // кто-то вошёл ко мне в мастерскую
   if (scene === 'w' + mySeat && q.scene !== scene && q.here && state === 'play') {
     wsDirty = true;
-    if (rivals(mySeat, s)) { sfx.alert(); buzz(40); showBanner('Гость в мастерской!', `${SEAT[s].name} у вас — берегите детали`, colorOf(s)); }
+    if (rivals(mySeat, s)) { sfx.alert(); buzz(40); showBanner('Гость в мастерской!', `${who(s)} у вас — берегите детали`, colorOf(s)); }
   }
   q.here = true; q.scene = scene; q.tx = x; q.ty = y;
   q.fx = +m.fx || 0; q.fy = +m.fy || 0; q.moving = +m.mv || 0;
@@ -1798,7 +1941,8 @@ function broadcastRoster() {
 }
 const setMode = v => { if (MODES[v]) mode = v; };
 function applyRoster(m) {
-  roster = Array.isArray(m.list) ? m.list.filter(e => e && typeof e.pid === 'string' && e.seat >= 0 && e.seat < SEATS) : [];
+  roster = Array.isArray(m.list) ? m.list.filter(e => e && typeof e.pid === 'string' && e.seat >= 0 && e.seat < SEATS)
+    .map(e => ({ pid: e.pid, seat: e.seat, name: cleanName(e.name) })) : [];
   if (Array.isArray(m.match)) matchSeats = m.match.filter(s => s >= 0 && s < SEATS);
   if (m.rounds) rounds = m.rounds;
   if (m.duration) duration = m.duration;
@@ -1807,10 +1951,11 @@ function applyRoster(m) {
   setSeat(e ? e.seat : -1);
   refreshStatus();
 }
-function hostWelcome(pid, v) {
+function hostWelcome(pid, v, name) {
   if (v !== VERSION) { net.send({ t: 'version', to: pid, v: VERSION }); return; }
   const e = rosterAdd(pid);
   if (!e) { net.send({ t: 'full', to: pid }); return; }
+  e.name = cleanName(name);
   broadcastRoster();
   net.send(syncMsg(pid));
 }
@@ -1881,13 +2026,14 @@ function onServer(m) {
       for (const p of m.peers || []) online.add(p.pid);
       if (role === 'host') {
         hostPid = myPid;
-        if (!roster.some(e => e.pid === myPid)) roster.unshift({ pid: myPid, seat: 0 });
+        const mine = roster.find(e => e.pid === myPid);
+        if (mine) mine.name = myName; else roster.unshift({ pid: myPid, seat: 0, name: myName });
         for (const p of m.peers || []) if (!roster.some(e => e.pid === p.pid) && !matchState()) rosterAdd(p.pid);
         broadcastRoster();
       } else {
         const h = (m.peers || []).find(p => p.role === 'host');
         hostPid = h ? h.pid : '';
-        if (hostPid) net.send({ t: 'hello', v: VERSION });
+        if (hostPid) net.send({ t: 'hello', v: VERSION, name: myName });
       }
       announce();
       refreshStatus();
@@ -1895,7 +2041,7 @@ function onServer(m) {
     case 'join': {
       online.add(m.pid);
       sfx.join();
-      if (m.role === 'host') { hostPid = m.pid; if (role !== 'host') net.send({ t: 'hello', v: VERSION }); }
+      if (m.role === 'host') { hostPid = m.pid; if (role !== 'host') net.send({ t: 'hello', v: VERSION, name: myName }); }
       announce();
       refreshStatus();
       break;
@@ -1915,7 +2061,12 @@ function onNet(m, from) {
   if (!from) { onServer(m); return; }
   const fs = seatOf(from), fromHost = from === hostPid;
   switch (m.t) {
-    case 'hello': if (role === 'host') hostWelcome(from, m.v); break;
+    case 'hello': if (role === 'host') hostWelcome(from, m.v, m.name); break;
+    case 'name': {
+      const e = role === 'host' && roster.find(x => x.pid === from);
+      if (e) { e.name = cleanName(m.name); broadcastRoster(); renderHud(); }
+      break;
+    }
     case 'full': if (m.to === myPid && fromHost) leaveRoom(`В комнате ${net.room} уже четыре игрока`); break;
     case 'version':
       if (m.to === myPid && fromHost) leaveRoom(`У создателя комнаты ${+m.v > VERSION ? 'новая версия игры — обновите страницу' : 'старая версия игры — пусть обновит страницу'}`);
@@ -1970,6 +2121,9 @@ function onNet(m, from) {
     case 'boiler': if (fromHost && inMatch()) applyBoiler(m); break;
     case 'boom': if (fromHost) applyBoom(m); break;
     case 'bpass': if (role === 'host' && fs >= 0) hostPass(m, fs); break;
+    case 'say': if (fs >= 0) onSay(fs, m.i); break;
+    case 'shoo': if (role === 'host' && fs >= 0) hostShoo(fs); break;
+    case 'shooed': if (fromHost) applyShooed(m); break;
     case 'evtEnd': if (fromHost) onEvtEnd(); break;
     case 'oil': if (fromHost && Array.isArray(m.list)) puddles = m.list.map(o => unpackPuddle(o)); break;
     case 'brk': if (fromHost && inMatch()) applyBreakdown(m.type); break;
@@ -1982,7 +2136,7 @@ function onNet(m, from) {
     case 'end': if (fromHost && inMatch()) guestEndRound(); break;
     case 'final':
       if (role !== 'host' || fs < 0) break;
-      finals[fs] = { s: +m.s || 0, d: +m.d || 0 };
+      finals[fs] = { s: +m.s || 0, d: +m.d || 0, st: cleanStats(m.st) };
       if (state === 'roundover' && finalWait > 0 && !waitingFinals().length) hostFinishRound();
       break;
     case 'result': if (fromHost) applyResult(m, true); break;
@@ -2260,7 +2414,7 @@ function drawTarget() {
   g.save();
   g.lineWidth = 2.5; g.setLineDash([6, 4]); g.lineDashOffset = -clock * 22;
   g.strokeStyle = BAD_KINDS.includes(t.kind) ? 'rgba(238,242,234,.6)' : t.kind === 'repair' ? C.hazard : STEAL_KINDS.includes(t.kind) ? C.alarm : myColor();
-  if (t.kind === 'belt' || t.kind === 'floor' || t.kind === 'wfloor' || t.kind === 'vFloor') { g.beginPath(); g.arc(t.x, t.y, 16, 0, PI * 2); g.stroke(); }
+  if (t.kind === 'belt' || t.kind === 'floor' || t.kind === 'wfloor' || t.kind === 'vFloor' || t.kind === 'shoo') { g.beginPath(); g.arc(t.x, t.y, 16, 0, PI * 2); g.stroke(); }
   else if (t.kind === 'beltPut') {
     drawItem(g, me.hands[me.hands.length - 1], t.x, t.y, 1, 0.45);
     g.beginPath(); g.arc(t.x, t.y, 16, 0, PI * 2); g.stroke();
@@ -2385,6 +2539,37 @@ function drawScenePlayers() {
     if (soot[seatOfP(p)] > 0) { g.save(); g.globalAlpha = Math.min(1, soot[seatOfP(p)]) * 0.7; dot(g, p.x, p.y, 12.5, '#1b1a18'); g.restore(); }
   }
   if (hot) drawBoilerOn(hot);
+  // имена под соперниками и фразы над головой
+  for (const p of list) {
+    const s = seatOfP(p), b = bubbles[s];
+    if (p !== me && nameOf(s)) drawTag(p, nameOf(s), colorOf(s));
+    if (b) drawBubble(p, PHRASES[b.i], b.t, hasBoiler(s));
+  }
+}
+// подпись «вверх ногами» не бывает: в развёрнутом цехе текст поворачиваем обратно
+function drawTag(p, text, color) {
+  g.save();
+  g.translate(p.x, p.y + (viewFlipped() ? -27 : 27));
+  if (viewFlipped()) g.rotate(PI);
+  g.font = '600 11px ' + FONT_B; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+  g.lineWidth = 3.5; g.strokeStyle = 'rgba(20,24,22,.85)'; g.strokeText(text, 0, 0);
+  g.fillStyle = color; g.fillText(text, 0, 0);
+  g.restore();
+}
+function drawBubble(p, text, t, high) {
+  g.save();
+  g.font = '700 12px ' + FONT_B;
+  const w = g.measureText(text).width + 14, h = 20;
+  g.translate(Math.max(w / 2 + 2, Math.min(W - w / 2 - 2, p.x)), over(p, high ? 68 : 40));
+  if (viewFlipped()) g.rotate(PI);
+  g.globalAlpha = t > 2.2 ? Math.max(0, (2.6 - t) / 0.4) : 1;
+  g.fillStyle = '#f4f1e8'; g.strokeStyle = '#1b1d18'; g.lineWidth = 1.5;
+  rr(g, -w / 2, -h / 2, w, h, 8); g.fill(); g.stroke();
+  g.beginPath(); g.moveTo(-5, h / 2 - 1); g.lineTo(0, h / 2 + 6); g.lineTo(5, h / 2 - 1); g.fill();
+  g.beginPath(); g.moveTo(-5, h / 2); g.lineTo(0, h / 2 + 6); g.lineTo(5, h / 2); g.stroke();
+  g.fillStyle = '#1b1d18'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, 0, 0.5);
+  g.restore();
 }
 // «Котёл»: красное кольцо под тем, у кого котёл, и сам котёл над головой — стрелка манометра ползёт к красному
 function drawHotRing(p) {
@@ -2542,6 +2727,7 @@ function drawHall() {
   }
   const crates = evt && evt.id === 'mystery';
   for (const it of belt) { const q = pathPos(beltS(it)); if (crates) drawCrate(q.x, q.y); else drawItem(g, it.type, q.x, q.y, 1, 1, true); }
+  drawCat();
   me.target = state === 'play' && me.stun <= 0 ? findTarget(me) : null;
   drawTarget();
   drawScenePlayers();
@@ -2585,9 +2771,9 @@ addEventListener('resize', fitCanvas);
 const ACT_LABEL = {
   belt:'Взять', floor:'Взять', wfloor:'Взять', mTake:'Взять', mUnload:'Забрать', mLoad:'Загрузить', repair:'Чинить',
   bench:'Положить', beltPut:'На ленту', drop:'Бросить', shove:'Толкнуть', vTake:'Утащить', vUnload:'Утащить', vFloor:'Утащить',
-  deliver:'Сдать',
+  deliver:'Сдать', shoo:'Брысь!',
 };
-let shownAct = '', shownTime = '', shownRush = null, shownEvt = null, shownRnd = '', shownOthers = '';
+let shownAct = '', shownTime = '', shownRush = null, shownEvt = null, shownRnd = '', shownOthers = '', shownMix = false;
 function draw() {
   const sx = shake > 0 ? (Math.random() - .5) * 12 * shake : 0, sy = shake > 0 ? (Math.random() - .5) * 12 * shake : 0;   // трясёт от взрыва котла
   if (viewFlipped()) g.setTransform(-scale, 0, 0, -scale, (W + sx) * scale, (H + sy) * scale);   // цех развёрнут на 180°
@@ -2644,13 +2830,16 @@ function hudFrame() {
     if (evt) parts.push(`${evt.short} · ${Math.max(1, Math.ceil(evt.dur - evt.t))} с`);
     if (urgent && urgent.by < 0) parts.push(`Срочно: ${PARTS[urgent.type].name.toLowerCase()} · ${Math.max(1, Math.ceil(urgent.dur - urgent.t))} с`);
     if (boiler && boiler.holder === mySeat) { parts.unshift('У вас котёл — толкайтесь!'); bad = true; }
-    else if (boiler && SEAT[boiler.holder]) parts.push(`Котёл у ${SEAT[boiler.holder].gen}`);
+    else if (boiler && SEAT[boiler.holder]) parts.push(`${who(boiler.holder)} с котлом`);
     const broken = machines.filter(m => m.broken > 0).map(m => MACHINES[m.type].tag);
     if (broken.length) { parts.push('Чинить: ' + broken.join(', ')); if (!evt) bad = true; }
     const o = ownerOf(me.scene);
     if (o >= 0 && o !== mySeat) parts.unshift(isMate(o) ? 'У напарника' : `В гостях у ${SEAT[o].gen}`);
     ev = parts.join(' · ');
   }
+  const mix = !!evt && evt.id === 'mixup';
+  if (mix !== shownMix) { document.body.classList.toggle('mixup', mix); shownMix = mix; }
+  if (!sayPanel.hidden && !['count', 'play', 'roundover'].includes(state)) sayPanel.hidden = true;
   const evKey = ev + bad;
   if (evKey !== shownEvt) { const e = $('evt'); e.hidden = !ev; e.textContent = ev; e.classList.toggle('bad', bad); shownEvt = evKey; }
   const live = state === 'count' || state === 'play' || state === 'pause' || state === 'roundover';
@@ -2702,7 +2891,8 @@ function renderOthers() {
   // напарник — первым и с ободком у кружка, передовик «Схватки» — со звёздочкой
   const list = (matchState() || state === 'over' ? matchSeats : roster.map(e => e.seat)).filter(s => s !== mySeat).sort((a, b) => isMate(b) - isMate(a) || a - b);
   const lead = leaderSeat();
-  const rows = list.map(s => [s, liveScore(s), (s === lead ? '★ ' : '') + (hasBoiler(s) ? '♨ ' : '') + whereOf(s), isMate(s)]);
+  // фраза видна в табло, даже если игрок в другой комнате
+  const rows = list.map(s => [s, liveScore(s), (s === lead ? '★ ' : '') + (hasBoiler(s) ? '♨ ' : '') + (bubbles[s] ? `«${PHRASES[bubbles[s].i]}»` : whereOf(s)), isMate(s)]);
   const key = JSON.stringify(rows);
   if (key === shownOthers) return;
   shownOthers = key;
@@ -2713,11 +2903,11 @@ function renderOthers() {
     const row = document.createElement('div');
     row.className = 'orow' + (where.endsWith('у вас!') ? ' alarm' : '') + (mate ? ' mate' : '');
     const dotEl = document.createElement('i'); dotEl.style.background = colorOf(s);
-    const name = document.createElement('em'); name.textContent = SEAT[s].name + (mate ? ' · напарник' : '');   // видно на большом экране
+    const name = document.createElement('em'); name.textContent = who(s) + (mate ? ' · напарник' : '');   // видно на большом экране
     const b = document.createElement('b'); b.textContent = sc; b.style.color = colorOf(s);
     const span = document.createElement('span'); span.textContent = where;
     row.append(dotEl, name, b, span);
-    row.title = SEAT[s].name + (mate ? ' · напарник' : '');
+    row.title = who(s) + (mate ? ' · напарник' : '');
     box.appendChild(row);
   }
 }
@@ -2726,7 +2916,7 @@ function whoText() {
   if (mySeat < 0) return 'Вы';
   if (teamsOn() && inMatch()) return `Вы · ${TEAMS[teamOf(mySeat)].short}`;
   if (hasBoiler(mySeat) && inMatch()) return 'Вы · с котлом';
-  return leaderSeat() === mySeat ? 'Вы · передовик' : `Вы · ${SEAT[mySeat].name.toLowerCase()}`;
+  return leaderSeat() === mySeat ? 'Вы · передовик' : `Вы · ${myName || SEAT[mySeat].name.toLowerCase()}`;
 }
 function renderHud() {
   // в командах — счёт смен: ваша первой
@@ -2762,7 +2952,7 @@ function hideOverlays() {
 }
 const radioVal = (name, def) => { const el = document.querySelector(`input[name="${name}"]:checked`); return el ? +el.value : def; };
 function setStatus(el, text, kind) { el.textContent = text; el.className = 'status' + (kind ? ' ' + kind : ''); el.hidden = !text; }
-const namesOf = seats => seats.map(s => SEAT[s].name).join(', ');
+const namesOf = seats => seats.map(who).join(', ');
 function renderRoster() {
   const ul = $('roster');
   ul.textContent = '';
@@ -2771,9 +2961,10 @@ function renderRoster() {
     const li = document.createElement('li');
     li.className = (e ? '' : 'empty') + (s === mySeat ? ' me' : '');
     const dotEl = document.createElement('i'); dotEl.style.background = colorOf(s);
-    const b = document.createElement('b'); b.textContent = SEAT[s].name;
+    const b = document.createElement('b'); b.textContent = e ? who(s) : SEAT[s].name;
     const span = document.createElement('span');
-    span.textContent = !e ? 'свободно' : s === mySeat ? (s === 0 ? 'вы, создатель' : 'вы') : !isOn(s) ? 'нет связи' : s === 0 ? 'создатель' : 'в комнате';
+    span.textContent = (e && e.name ? SEAT[s].name.toLowerCase() + ' · ' : '') +
+      (!e ? 'свободно' : s === mySeat ? (s === 0 ? 'вы, создатель' : 'вы') : !isOn(s) ? 'нет связи' : s === 0 ? 'создатель' : 'в комнате');
     li.append(dotEl, b, span);
     ul.appendChild(li);
   }
@@ -2926,7 +3117,7 @@ function showFinal() {
     const pl = document.createElement('span'); pl.className = 'pl'; pl.textContent = place(s);
     const dotEl = document.createElement('i'); dotEl.style.background = colorOf(s);
     const name = document.createElement('span');
-    name.textContent = SEAT[s].name + (s === mySeat ? ' · вы' : '');
+    name.textContent = who(s) + (s === mySeat ? ' · вы' : '');
     const sm = document.createElement('small');
     sm.textContent = `раундов выиграно: ${tally.wins[s]} · ${tally.done[s]} ${plural(tally.done[s], ['изделие', 'изделия', 'изделий'])}`;
     name.appendChild(sm);
@@ -2934,9 +3125,42 @@ function showFinal() {
     li.append(pl, dotEl, name, b);
     ol.appendChild(li);
   }
+  renderMedals();
   refreshStatus();
   showSheet('over');
   releaseAwake();
+}
+// медали за матч: у кого больше всех, при равенстве — у всех лучших
+const MEDALS = [
+  { id: 'done',   icon: '🔨', name: 'Ударник',      what: ['изделие', 'изделия', 'изделий'] },
+  { id: 'steal',  icon: '🦝', name: 'Главный вор',  what: ['кража', 'кражи', 'краж'] },
+  { id: 'shove',  icon: '🐏', name: 'Таран',        what: ['толчок', 'толчка', 'толчков'] },
+  { id: 'fix',    icon: '🔧', name: 'Ремонтник',    what: ['починка', 'починки', 'починок'] },
+  { id: 'urgent', icon: '📦', name: 'Курьер',       what: ['срочный заказ', 'срочных заказа', 'срочных заказов'] },
+  { id: 'pass',   icon: '🔥', name: 'Горячие руки', what: ['передача котла', 'передачи котла', 'передач котла'] },
+  { id: 'boom',   icon: '💥', name: 'Чумазый',      what: ['взрыв', 'взрыва', 'взрывов'] },
+  { id: 'fall',   icon: '🤕', name: 'Неваляшка',    what: ['падение', 'падения', 'падений'] },
+];
+function listNames(seats) {
+  const n = seats.map(s => s === mySeat ? 'вы' : who(s)), txt = n.length > 1 ? n.slice(0, -1).join(', ') + ' и ' + n[n.length - 1] : n[0];
+  return txt[0].toUpperCase() + txt.slice(1);
+}
+function renderMedals() {
+  const ul = $('medals'), val = (k, s) => k === 'done' ? +tally.done[s] || 0 : +(tally.st && tally.st[s] && tally.st[s][k]) || 0;
+  ul.textContent = '';
+  for (const md of MEDALS) {
+    const top = Math.max(0, ...matchSeats.map(s => val(md.id, s)));
+    if (!top) continue;
+    const win = matchSeats.filter(s => val(md.id, s) === top);
+    const li = document.createElement('li');
+    if (win.includes(mySeat)) li.className = 'me';
+    const ic = document.createElement('span'); ic.className = 'mi'; ic.textContent = md.icon;
+    const b = document.createElement('b'); b.textContent = md.name;
+    const sm = document.createElement('span'); sm.textContent = `${listNames(win)} · ${top} ${plural(top, md.what)}`;
+    li.append(ic, b, sm);
+    ul.appendChild(li);
+  }
+  $('medalsBox').hidden = !ul.children.length;
 }
 // итоги командного матча: смены по сумме очков, под каждой — её игроки
 function showTeamFinal() {
@@ -2962,12 +3186,13 @@ function showTeamFinal() {
     name.textContent = TEAMS[t].name + (t === mine ? ' · ваша' : '');
     const sm = document.createElement('small');
     const wins = seats.length ? tally.wins[seats[0]] : 0;
-    sm.textContent = seats.map(s => `${SEAT[s].name} ${tally.total[s]}`).join(' · ') + ` · раундов: ${wins}`;
+    sm.textContent = seats.map(s => `${who(s)} ${tally.total[s]}`).join(' · ') + ` · раундов: ${wins}`;
     name.appendChild(sm);
     const b = document.createElement('b'); b.textContent = tot[t]; b.style.color = colorOf(seats[0]);
     li.append(pl, dotEl, name, b);
     ol.appendChild(li);
   }
+  renderMedals();
   refreshStatus();
   showSheet('over');
   releaseAwake();
@@ -3071,6 +3296,23 @@ $('joinForm').addEventListener('submit', e => {
   enterRoom(code, 'guest');
 });
 $('btnShare').addEventListener('click', share);
+// своё имя: хранится в браузере, создатель комнаты рассылает его остальным вместе со списком игроков
+function setMyName(v) {
+  const n = cleanName(v);
+  if (n === myName) return;
+  myName = n;
+  try { localStorage.setItem('ceh7-name', n); } catch (e) {}
+  const e = roster.find(x => x.pid === myPid);
+  if (e) e.name = n;
+  if (role === 'host') broadcastRoster(); else { net.send({ t: 'name', name: n }); refreshStatus(); }
+  renderHud();
+}
+const nameInput = $('myName');
+nameInput.value = myName;
+let nameT = 0;
+nameInput.addEventListener('input', () => { clearTimeout(nameT); nameT = setTimeout(() => setMyName(nameInput.value), 400); });
+nameInput.addEventListener('change', () => { clearTimeout(nameT); setMyName(nameInput.value); nameInput.value = myName; });
+nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') nameInput.blur(); });
 const pickedMode = () => { const el = document.querySelector('input[name="mode"]:checked'); return el && MODES[el.value] ? el.value : 'classic'; };
 $('btnStart').addEventListener('click', () => {
   if (role !== 'host') return;
@@ -3174,6 +3416,9 @@ if (DEBUG) {
     urgentNow: type => { if (role === 'host' && state === 'play') { if (urgent) endUrgent(-1, ''); startUrgent(type); } },
     target: () => { const t = findTarget(me); return t && t.kind; },
     get boiler() { return boiler; }, get soot() { return soot; },
+    get bubbles() { return bubbles; }, get stats() { return stats; }, get myName() { return myName; },
+    who, say: sayPhrase, setName: setMyName, cat,
+    catAhead: d => { const c = cat(); return c && pathPos(c.s + evt.arg[1] * d); },
     boilerNow: s => { if (role === 'host' && state === 'play') { boiler = null; startBoiler(s); } },
     boomSoon: () => { if (role === 'host' && boiler) boiler.t = boiler.dur - 0.05; },
     get cap() { return capOf(); }, forklift, liftAhead: d => { const f = forklift(); return f && liftAt(f.s + evt.arg[1] * d); },

@@ -121,6 +121,14 @@ canvas{display:block;border-radius:6px;background:#8f948c;touch-action:none;box-
   background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.45) 0 14%,transparent 15%),var(--me);
   box-shadow:0 4px 10px rgba(0,0,0,.45);
 }
+/* быстрые фразы: кнопка в углу джойстика, панель — поверх низа поля */
+.say-btn{position:absolute;left:6px;top:6px;z-index:3;width:38px;height:34px;padding:0;border-radius:8px;border:1px solid var(--line);background:var(--panel-hi);font-size:17px;line-height:1;display:grid;place-items:center;touch-action:manipulation}
+.say-panel{position:absolute;left:8px;right:8px;bottom:8px;z-index:4;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:8px;border-radius:10px;background:rgba(20,24,22,.94);border:1px solid var(--line)}
+.say-panel button{min-width:0;padding:11px 4px;border-radius:7px;border:1px solid var(--line);background:var(--panel-hi);font:600 13px/1.1 var(--f-body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.say-panel kbd{display:none}
+.nw{white-space:nowrap}
+.mixup .knob{background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.45) 0 14%,transparent 15%),var(--alarm)}
+.mixup .zone{box-shadow:inset 0 0 0 2px var(--alarm)}
 .act{
   align-self:center;justify-self:center;width:min(100%,96px);aspect-ratio:1;border-radius:50%;border:none;
   background:var(--me);color:#17130f;box-shadow:0 5px 0 rgba(0,0,0,.4);touch-action:none;padding:0;
@@ -190,6 +198,10 @@ kbd{
 .roster li span{color:var(--ink-dim);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .roster li.empty{opacity:.45}
 .roster li.me{outline:2px solid var(--me)}
+.namebox{display:flex;align-items:center;gap:10px;margin:-6px 0 0;font-size:14px;color:var(--ink-dim)}
+.namebox span{flex:none}
+.namebox input{flex:1 1 auto;min-width:0;padding:8px 11px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:600 16px/1.2 var(--f-body)}
+.namebox input::placeholder{color:var(--line);font-weight:500}
 .teamhead{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:6px;font:600 11px/1.3 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--hazard)}
 .mode-desc{margin:-6px 0 0;font-size:13px;line-height:1.4;color:var(--ink-dim)}
 .opts{display:flex;flex-direction:column;gap:8px}
@@ -241,6 +253,12 @@ kbd{
 .standings span{min-width:0;font-size:14px}
 .standings small{display:block;color:var(--ink-dim);font-size:12px}
 .standings b{font:400 22px/1 var(--f-display);font-variant-numeric:tabular-nums}
+.medals{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}
+.medals li{display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;gap:0 10px;padding:8px 10px;border-radius:8px;background:var(--bg)}
+.medals li.me{outline:2px solid var(--me)}
+.medals .mi{grid-row:span 2;font-size:24px;line-height:1;text-align:center}
+.medals b{font:600 14px/1.25 var(--f-body)}
+.medals span{font-size:12px;line-height:1.3;color:var(--ink-dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 .turn{
   display:none;position:fixed;inset:0;z-index:40;flex-direction:column;align-items:center;justify-content:center;gap:12px;
@@ -320,6 +338,8 @@ kbd{
   .act{grid-area:act;justify-self:stretch;align-self:stretch;width:auto;height:76px;aspect-ratio:auto;border-radius:12px}
   .act span{max-width:none;font-size:17px}
   .zone{grid-area:keys;display:block}
+  .say-btn{left:auto;right:10px;top:10px}
+  .say-panel kbd{display:inline-block;margin-right:4px}
   .key-hint{max-width:none;justify-content:flex-start;gap:4px;line-height:1.9;text-align:left}
   .wide-only{display:inline}
   .workbox{grid-area:work;display:flex;flex-direction:column;gap:10px;min-height:0;overflow:auto}
@@ -347,12 +367,14 @@ kbd{
   <div class="field" id="field">
     <span class="evt" id="evt" hidden></span>
     <canvas id="game" width="432" height="576" aria-label="Цех с конвейерной лентой или мастерская со станками и верстаком"></canvas>
+    <div class="say-panel" id="sayPanel" hidden aria-label="Быстрые фразы"></div>
   </div>
 
   <section class="pad" aria-label="Управление">
     <div class="zone" id="zone">
+      <button class="say-btn" id="btnSay" type="button" aria-label="Быстрые фразы" title="Фразы — клавиши 1–8">💬</button>
       <span class="touch-hint">Ведите пальцем</span>
-      <span class="key-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки<span class="wide-only"> — ходить, <kbd>E</kbd> или <kbd>Пробел</kbd> — действие, <kbd>Esc</kbd> — пауза, <kbd>F</kbd> — весь экран</span></span>
+      <span class="key-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки<span class="wide-only"> — ходить, <kbd>E</kbd> или <kbd>Пробел</kbd> — действие, <span class="nw"><kbd>1</kbd>–<kbd>8</kbd></span> — фразы, <kbd>Esc</kbd> — пауза, <kbd>F</kbd> — весь экран</span></span>
       <span class="base"><span class="knob"></span></span>
     </div>
     <button class="act" id="act" type="button"><span id="actl">Действие</span></button>
@@ -388,7 +410,8 @@ kbd{
           <li>Через чужую дверь можно зайти в мастерскую соперника и утащить детали с пола или готовое из станков. Чужими станками и верстаком пользоваться нельзя.</li>
           <li>Соперника можно толкнуть: детали из рук упадут на пол.</li>
           <li>В цехе брошенное исчезает через 25 секунд, в мастерской лежит до конца раунда.</li>
-          <li>Очки за раунды складываются. Между раундами — магазин улучшений, отстающим доплачивают.</li>
+          <li>Очки за раунды складываются. Между раундами — магазин улучшений, отстающим доплачивают. В конце матча — медали.</li>
+          <li>Своё имя пишется в комнате перед матчем. Кнопка 💬 в углу джойстика — быстрые фразы над головой.</li>
         </ul>
       </div>
       <div>
@@ -419,6 +442,8 @@ kbd{
           <span><b>Ударная смена</b>станки работают вдвое быстрее</span>
           <span><b>Выдали тележки</b>можно нести на деталь больше</span>
           <span><b>Ящики без наклеек</b>не видно, что едет по ленте</span>
+          <span><b>Провода перепутались</b>15 секунд ходите наоборот</span>
+          <span><b>Кот в цехе</b>роняет детали с ленты — гоните его: +10</span>
           <span><b>Премия смене</b>в командах: отстающим ×2</span>
           <span><b>Пропускной режим</b>в командах: к соперникам не войти</span>
           <span><b>Гонка смен</b>в командах: первой смене с изделием +30</span>
@@ -426,7 +451,7 @@ kbd{
           <span><b>Стенка на стенку</b>в схватке: толчок забирает 5 очков</span>
         </div>
       </div>
-      <p class="keys-note">С клавиатуры: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки, действие — <kbd>E</kbd>, <kbd>Пробел</kbd> или <kbd>Enter</kbd>, пауза — <kbd>Esc</kbd>.</p>
+      <p class="keys-note">С клавиатуры: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки, действие — <kbd>E</kbd>, <kbd>Пробел</kbd> или <kbd>Enter</kbd>, фразы — <kbd>1</kbd>–<kbd>8</kbd>, пауза — <kbd>Esc</kbd>.</p>
       <div class="actions"><button class="btn sound-btn" type="button">Звук: вкл</button><button class="btn full-btn only-fine" type="button">На весь экран</button></div>
     </div>
   </div>
@@ -442,6 +467,7 @@ kbd{
         <div class="teamhead" id="teamHead" hidden><span>Дневная смена</span><span>Ночная смена</span></div>
         <ul class="roster" id="roster"></ul>
       </div>
+      <label class="namebox"><span>Ваше имя</span><input id="myName" maxlength="12" autocomplete="off" spellcheck="false" placeholder="чтобы вас узнавали" enterkeyhint="done"></label>
       <p class="status wait" id="lobbyStatus">Подключаемся…</p>
       <div class="opts" id="hostOpts">
         <fieldset class="dur modes">
@@ -509,6 +535,7 @@ kbd{
       <p class="eyebrow">Матч окончен</p>
       <p class="verdict" id="vTitle">Ничья</p>
       <ol class="standings" id="standings"></ol>
+      <div id="medalsBox" hidden><h3>Медали</h3><ul class="medals" id="medals"></ul></div>
       <p class="status" id="overStatus"></p>
       <div class="actions">
         <button class="btn primary" id="btnAgain" type="button">Новый матч</button>
