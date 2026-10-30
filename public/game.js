@@ -145,6 +145,8 @@ let idSeq = 0, ridSeq = 0, sendT = 0, pressT = 0, lastSent = '', lastSentAt = -9
 let mode = 'classic';            // режим матча: classic, teams, brawl — выбирает создатель комнаты
 // срочный заказ (ведёт создатель) и наша сдача, пока создатель не ответил
 let urgent = null, urgentAt = 0, urgentSeq = 0, pendingD = null;
+// «Котёл»: у кого он и сколько ему осталось (ведёт создатель), когда появится следующий; взрывы для картинки
+let boiler = null, boilerAt = 0, boilerSeq = 0, shake = 0, booms = [], soot = {}, hissT = 0;
 
 function newWallet() { return { coins: 0, up: Object.fromEntries(UPGRADES.map(u => [u.id, 0])) }; }
 function newTally() { return { total: [0, 0, 0, 0], wins: [0, 0, 0, 0], done: [0, 0, 0, 0] }; }
@@ -172,6 +174,7 @@ const MODES = {
   classic: { name: 'Классика', desc: 'Каждый сам за себя: лента, станки и набеги на чужие мастерские.' },
   teams: { name: 'Команды', desc: 'Дневная смена (оранжевый и зелёный) против ночной (синий и фиолетовый). Напарники работают на станках и верстаке друг друга, своих толкать нельзя. Втроём одиночке очки ×2. В цехе бывают срочные заказы.' },
   brawl: { name: 'Схватка', desc: 'Каждый сам за себя. Лидер раунда ходит в каске: кто толкнёт лидера, заберёт 10 очков. В цехе срочные заказы: кто первым принёс деталь к окну приёмки, тот и получил премию.' },
+  boiler: { name: 'Котёл', desc: 'Каждый сам за себя, а по цеху ходит котёл под давлением — новый всегда достаётся лидеру. С котлом ничего не взять, зато бегаешь быстрее: толкни любого, и котёл перейдёт к нему. У кого рванёт, тот теряет четверть очков за раунд. Толчки сильнее, события чаще, бывают срочные заказы.' },
 };
 const TEAMS = [
   { name: 'Дневная смена', short: 'дневная', gen: 'дневной смены', dat: 'дневной смене', ins: 'дневной сменой' },
@@ -186,6 +189,13 @@ const teamSeats = t => matchSeats.filter(s => teamOf(s) === t);
 // втроём в командах одиночке очки удваиваются
 const soloMult = () => teamsOn() && matchSeats.length === 3 && teamSeats(teamOf(mySeat)).length === 1 ? 2 : 1;
 const urgentOn = () => mode !== 'classic';
+const boilerOn = () => mode === 'boiler';
+const hasBoiler = s => !!boiler && boiler.holder === s;
+// «Котёл»: сколько очков сгорает при взрыве, сколько секунд нельзя вернуть котёл тому, кто его дал, и прибавка к скорости
+const BOOM_CUT = 0.25, BACK_T = 3, BOILER_SPEED = 1.2;
+const backPass = s => !!boiler && boiler.from === s && boiler.t - boiler.pt < BACK_T;
+// в «Котле» всё бойче: события чаще
+const evtGap = () => boilerOn() ? 9 + Math.random() * 5 : 16 + Math.random() * 8;
 const roundScore = s => s === mySeat ? score : peers[s] ? peers[s].score : 0;
 // передовик «Схватки» — у кого больше всех очков за раунд; при равенстве каски нет ни у кого
 function leaderSeat() {
@@ -408,6 +418,16 @@ function tone(f, d, type = 'square', v = .05, slide = 0, delay = 0) {
   o.connect(gn); gn.connect(actx.destination);
   o.start(t0); o.stop(t0 + d + 0.03);
 }
+// шум — для взрыва котла
+function noise(d, v) {
+  if (!actx || muted) return;
+  const n = Math.floor(actx.sampleRate * d), buf = actx.createBuffer(1, n, actx.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / n) ** 2;
+  const src = actx.createBufferSource(), gn = actx.createGain();
+  src.buffer = buf; gn.gain.value = v;
+  src.connect(gn); gn.connect(actx.destination);
+  src.start();
+}
 const sfx = {
   pick:   () => tone(620, .07, 'square', .035, 140),
   place:  () => tone(360, .09, 'triangle', .07, -90),
@@ -428,6 +448,9 @@ const sfx = {
   join:   () => { tone(659, .1, 'square', .04); tone(988, .16, 'square', .04, 0, .1); },
   thief:  () => { tone(300, .1, 'sawtooth', .05, -120); tone(200, .16, 'sawtooth', .05, -80, .1); },
   beep:   () => tone(1250, .06, 'square', .025),
+  whistle:() => { tone(880, .35, 'sine', .045, 700); tone(1320, .25, 'sine', .03, 400, .12); },
+  hiss:   () => tone(1900, .04, 'square', .018, -500),
+  boom:   () => { noise(.7, .22); tone(110, .5, 'sawtooth', .08, -70); tone(70, .7, 'square', .06, -40, .03); },
 };
 
 // ---------- ввод ----------
@@ -539,7 +562,7 @@ function updatePlayer(p, dt, canMove) {
   p.moving = m;
   p.walk += dt * 13 * m;
   const slip = onOil(p);
-  const sp = SPEED * (1 + 0.1 * up().speed) * (slip ? 1.15 : 1);
+  const sp = SPEED * (1 + 0.1 * up().speed) * (slip ? 1.15 : 1) * (hasBoiler(mySeat) ? BOILER_SPEED : 1);
   const k = slip ? Math.min(1, dt * 2.2) : 1;
   p.vx += (ix * sp - p.vx) * k;
   p.vy += (iy * sp - p.vy) * k;
@@ -603,6 +626,13 @@ function findTarget(p) {
   const room = p.hands.length < capOf(), holding = p.hands.length > 0;
   let best = null, bs = Infinity;
   const take = (d, max, t, pen = 0) => { if (d <= max * reach && d + pen < bs) { bs = d + pen; best = t; } };
+  // с котлом руки заняты: можно только толкнуть — и котёл перейдёт к толкнутому
+  if (hasBoiler(mySeat)) {
+    if (p.shoveCd <= 0) for (const q of scenePlayers()) {
+      if (q !== me && q.guard <= 0 && q.stun <= 0 && !backPass(q.seat)) take(Math.hypot(q.x - ix, q.y - iy) - 10, 24, { kind:'shove', q }, 4);
+    }
+    return best || { kind:'boilerNo' };
+  }
   const sc = p.scene, o = ownerOf(sc);
   if (sc === 'hall') {
     if (room) {
@@ -715,7 +745,7 @@ function dropItem(type, x, y) {
   }
 }
 function doShove(q) {
-  const force = 300 * (1 + 0.3 * up().elbow);
+  const force = 300 * (1 + 0.3 * up().elbow) * (boilerOn() ? 1.4 : 1);
   me.shoveCd = 1.6 * (1 - 0.3 * up().elbow);
   q.guard = 0.9 + GUARD;   // не толкать второй раз, пока не встал
   burst(q.x, q.y, 10, ['#d8d2c0', '#a9a291'], 130, .4, 3);
@@ -742,6 +772,11 @@ function getShoved(dx, dy, force, by) {
       addText(me.x, over(me, 54), `−${pts}`, C.alarm, 1.3, true);
       renderHud(); sendScore();
     }
+  }
+  // «Котёл»: толкнул тот, у кого котёл, — котёл теперь мой; решает создатель, кто успел первым
+  if (boiler && by >= 0 && by !== mySeat && boiler.holder === by) {
+    const m = { t: 'bpass', id: boiler.id, from: by };
+    if (role === 'host') hostPass(m, mySeat); else net.send(m);
   }
   burst(me.x, me.y, 10, ['#d8d2c0', '#a9a291'], 130, .4, 3);
   sfx.shove(); buzz(50);
@@ -834,6 +869,7 @@ function doAction() {
       break;
     }
     case 'mBusy': say(t.m.state === 'ready' ? 'Руки заняты' : 'Станок работает'); break;
+    case 'boilerNo': say('С котлом руки заняты — толкайтесь!'); break;
     case 'repair': {
       const m = t.m, fp = machFront(m, 18), n = up().kit ? 2 : 1;
       m.broken = Math.max(0, m.broken - n); sfx.clank();
@@ -1069,7 +1105,7 @@ function startEvent(forceId) {
     const type = types[Math.floor(Math.random() * types.length)];
     net.send({ t: 'brk', type });
     applyBreakdown(type);
-    nextEvtAt = elapsed + 16 + Math.random() * 8;
+    nextEvtAt = elapsed + evtGap();
     return;
   }
   let team = 0;
@@ -1086,8 +1122,8 @@ function startEvent(forceId) {
 }
 function hostEvents() {
   if (evt) {
-    if (evt.id === 'race' && hostRace()) nextEvtAt = elapsed + 16 + Math.random() * 8;
-    else if (evt.t >= evt.dur) { onEvtEnd(); net.send({ t: 'evtEnd' }); nextEvtAt = elapsed + 16 + Math.random() * 8; }
+    if (evt.id === 'race' && hostRace()) nextEvtAt = elapsed + evtGap();
+    else if (evt.t >= evt.dur) { onEvtEnd(); net.send({ t: 'evtEnd' }); nextEvtAt = elapsed + evtGap(); }
   } else if (!CALM && elapsed >= nextEvtAt && timeLeft > RUSH_AT + 16) {
     startEvent();
   }
@@ -1096,7 +1132,7 @@ function hostEvents() {
 // ---------- срочные заказы: окна приёмки в цехе, кто первым принёс деталь — тому премия ----------
 const WINDOWS = [{ x: 3 * T, y: (ROWS - 1) * T, w: 3 * T, h: T }, { x: 3 * T, y: 0, w: 3 * T, h: T }];
 const URGENT_DUR = 25;
-const nextUrgentIn = () => mode === 'brawl' ? 16 + Math.random() * 8 : 26 + Math.random() * 10;
+const nextUrgentIn = () => mode === 'teams' ? 26 + Math.random() * 10 : 16 + Math.random() * 8;
 function hostUrgent() {
   if (!urgentOn()) return;
   if (urgent) { if (urgent.t >= urgent.dur) endUrgent(-1, ''); return; }
@@ -1144,6 +1180,107 @@ function onDeliverDenied(rid) {
   me.hands.push(pendingD.type); pendingD = null;
   say('Не успели!');
   sendState(true);
+}
+
+// ---------- «Котёл»: горячая картошка. У кого котёл, решает создатель; толчок передаёт котёл толкнутому ----------
+function hostBoiler() {
+  if (!boilerOn()) return;
+  if (boiler) { if (boiler.t >= boiler.dur) hostBoom(); return; }
+  if (!CALM && elapsed >= boilerAt && timeLeft > 5) startBoiler();
+}
+// новый котёл — лидеру раунда (при равенстве — любому из лидеров)
+function startBoiler(seat) {
+  const seats = matchSeats.filter(isOn);
+  if (!seats.length) return;
+  let h = seat;
+  if (!seats.includes(h)) {
+    const top = Math.max(...seats.map(roundScore)), best = seats.filter(s => roundScore(s) === top);
+    h = best[Math.floor(Math.random() * best.length)];
+  }
+  sendBoiler({ id: ++boilerSeq, holder: h, from: -1, dur: 12 + Math.random() * 6, t: 0, pt: 0 });
+}
+function sendBoiler(b) {
+  const m = { t: 'boiler', id: b.id, holder: b.holder, from: b.from, dur: r1(b.dur), bt: r1(b.t), pt: r1(b.pt) };
+  net.send(m);
+  applyBoiler(m);
+}
+// толкнутый говорит: «меня толкнул тот, у кого котёл» — засчитываем, если котёл всё ещё у него
+function hostPass(m, s) {
+  const b = boiler;
+  if (!b || state !== 'play' || +m.id !== b.id || +m.from !== b.holder || s === b.holder || !matchSeats.includes(s)) return;
+  if (s === b.from && b.t - b.pt < BACK_T) return;   // сразу вернуть тому, кто дал, нельзя
+  sendBoiler({ ...b, holder: s, from: b.holder, pt: b.t });
+}
+function applyBoiler(m) {
+  const h = +m.holder;
+  if (!SEAT[h]) return;
+  const prev = boiler, fresh = !prev || prev.id !== +m.id;
+  boiler = { id: +m.id || 0, holder: h, from: SEAT[+m.from] ? +m.from : -1, dur: +m.dur || 15, t: +m.bt || 0, pt: +m.pt || 0 };
+  if (h === mySeat && (fresh || prev.holder !== mySeat)) {
+    // котёл в руки — детали из рук на пол
+    while (me.hands.length) dropItem(me.hands.pop(), me.x + (Math.random() - .5) * 16, me.y + (Math.random() - .5) * 16);
+    showBanner(fresh ? 'Вам котёл!' : 'Котёл у вас!', 'Толкните кого-нибудь, пока не рвануло', C.alarm);
+    sfx.whistle(); buzz(80);
+    sendState(true);
+  } else if (fresh) showBanner(`Котёл у ${SEAT[h].gen}`, 'Не подпускайте: толчком котёл переходит', colorOf(h));
+  // кто передал, видит «Держи!» над тем, кому достался котёл
+  if (!fresh && boiler.from === mySeat && h !== mySeat) { const q = peers[h]; if (q && q.here && q.scene === me.scene) addText(q.x, over(q, 34), 'Держи!', myColor(), 1.2, true); }
+  renderHud();
+}
+function hostBoom() {
+  const m = { t: 'boom', id: boiler.id, holder: boiler.holder };
+  net.send(m);
+  applyBoom(m);
+  boilerAt = elapsed + 5 + Math.random() * 3;
+}
+// рванул: у кого в руках — минус четверть очков за раунд и оглушение, кто рядом — отлетает
+function applyBoom(m) {
+  if (!boiler || +m.id !== boiler.id) return;
+  const h = boiler.holder, p = h === mySeat ? me : peers[h];
+  boiler = null;
+  soot[h] = 4;
+  if (p && (h === mySeat || (p.here && p.scene === me.scene))) {
+    burst(p.x, p.y, 44, ['#f2f4f0', '#c9cfcc', '#9aa3a0', '#ffd27a'], 280, 1.1, 7);
+    booms.push({ x: p.x, y: p.y, sc: p.scene, t: 0 });
+    shake = 1;
+    if (h !== mySeat && state === 'play') {
+      const dx = me.x - p.x, dy = me.y - p.y, d = Math.hypot(dx, dy);
+      if (d < 2.2 * T) { me.kx = dx / (d || 1) * 420; me.ky = dy / (d || 1) * 420; me.stun = Math.max(me.stun, 0.4); sendState(true); }
+    }
+  }
+  if (h === mySeat) {
+    const pts = Math.round(score * BOOM_CUT);
+    score -= pts;
+    me.stun = 1.6; me.guard = me.stun + GUARD;
+    addText(me.x, over(me, 40), pts ? `−${pts}` : 'БАХ!', C.alarm, 1.4, true);
+    showBanner('БАХ!', pts ? `Котёл рванул у вас: −${pts}` : 'Котёл рванул у вас', C.alarm);
+    buzz(250);
+    renderHud(); sendScore(); sendState(true);
+  } else {
+    showBanner('БАХ!', `Котёл рванул у ${SEAT[h].gen}`, colorOf(h));
+    renderHud();
+  }
+  sfx.boom();
+}
+// пар из котла, тиканье давления, сажа после взрыва
+function boilerFx(dt) {
+  shake = Math.max(0, shake - dt * 2.5);
+  for (const s in soot) soot[s] = Math.max(0, soot[s] - dt);
+  for (let i = booms.length - 1; i >= 0; i--) { booms[i].t += dt; if (booms[i].t > 0.6) booms.splice(i, 1); }
+  if (!boiler) return;
+  const p = boiler.holder === mySeat ? me : peers[boiler.holder];
+  if (!p || (p !== me && !(p.here && p.scene === me.scene))) return;
+  const k = Math.min(1, boiler.t / boiler.dur), rise = viewFlipped() ? 1 : -1;
+  if (Math.random() < dt * (3 + 14 * k)) {
+    const l = 0.6 + Math.random() * 0.5;
+    sparks.push({ x: p.x + (Math.random() - .5) * 8, y: over(p, 54), vx: (Math.random() - .5) * 24, vy: rise * (40 + Math.random() * 40), life: l, max: l, c: 'rgba(236,240,236,.75)', s: 5 + Math.random() * 4 });
+  }
+  hissT -= dt;
+  if (hissT <= 0 && state === 'play') {
+    hissT = 0.85 - 0.65 * k;
+    sfx.hiss();
+    if (p === me && k > 0.8) buzz(15);
+  }
 }
 const packItem = it => ({ id: it.id, type: it.type, off: r1(it.off) });
 const packFloor = it => ({ id: it.id, type: it.type, x: r1(it.x), y: r1(it.y), age: r1(it.age) });
@@ -1251,7 +1388,7 @@ function hostStartRound(n) {
 function startRoundLocal(n, seed) {
   round = n; roundSeed = seed;
   roundParts();
-  urgent = null; pendingD = null; urgentAt = mode === 'brawl' ? 14 + Math.random() * 6 : 24 + Math.random() * 8;
+  urgent = null; pendingD = null; urgentAt = mode === 'teams' ? 24 + Math.random() * 8 : 14 + Math.random() * 6;
   orderRng = mulberry32(seed); orderSeq = []; done = 0; score = 0;
   machines.forEach(m => { m.state = 'idle'; m.t = 0; m.dur = 1; m.inputs = []; m.broken = 0; });
   for (const mir of mirrors) { mir.m = newMachines(); mir.f = []; mir.ord = null; mir.bd = 0; }
@@ -1266,7 +1403,8 @@ function startRoundLocal(n, seed) {
     q.seat = s; q.here = true; q.w = old[s] ? old[s].w : {};
     peers[s] = q;
   }
-  sparks = []; texts = []; evt = null; banner = null; lastEvtId = ''; nextEvtAt = 16 + Math.random() * 6;
+  sparks = []; texts = []; evt = null; banner = null; lastEvtId = ''; nextEvtAt = (boilerOn() ? 9 : 16) + Math.random() * 6;
+  boiler = null; boilerAt = 7 + Math.random() * 4; booms = []; soot = {}; shake = 0;
   rush = false; timeLeft = duration; elapsed = 0; spawnT = 0.6; goT = 0; clockT = 0; finalWait = 0; fade = 0;
   myReady = false; actionQueue.length = 0; keys.clear();
   state = 'count'; countT = 3;
@@ -1282,7 +1420,7 @@ function startRoundLocal(n, seed) {
 const waitingFinals = () => others().filter(s => isOn(s) && !finals[s]);
 function hostEndRound() {
   state = 'roundover'; timeLeft = 0; rush = false; evt = null; banner = null; actionQueue.length = 0;
-  urgent = null; pendingD = null;
+  urgent = null; pendingD = null; boiler = null;
   finals = {};
   net.send({ t: 'end' });
   finalWait = waitingFinals().length ? 2.5 : 0.01;   // ждём итоги остальных, но недолго
@@ -1291,7 +1429,7 @@ function hostEndRound() {
 function guestEndRound() {
   if (state === 'roundover' || state === 'shop' || state === 'over') return;
   state = 'roundover'; timeLeft = 0; rush = false; evt = null; banner = null; actionQueue.length = 0;
-  urgent = null; pendingD = null;
+  urgent = null; pendingD = null; boiler = null;
   hideOverlays();
   net.send({ t: 'final', s: score, d: done });
   sfx.end(); buzz(80);
@@ -1408,6 +1546,7 @@ function hostTick(dt) {
     }
     hostEvents();
     hostUrgent();
+    hostBoiler();
     if (!rush && timeLeft <= RUSH_AT) { rush = true; net.send({ t: 'rush' }); onRush(); }
   } else if (state === 'roundover' && finalWait > 0) {
     finalWait -= dt;
@@ -1441,8 +1580,10 @@ function update(dt) {
       timeLeft = Math.max(0, timeLeft - dt); elapsed += dt;
       if (evt) evt.t += dt;
       if (urgent) urgent.t += dt;
+      if (boiler) boiler.t += dt;
       if (role !== 'host' && evt && evt.t > evt.dur + 3) evt = null;   // если «конец события» потерялся
       if (role !== 'host' && urgent && urgent.t > urgent.dur + 3) urgent = null;
+      if (role !== 'host' && boiler && boiler.t > boiler.dur + 3) boiler = null;
     }
     if (role === 'host') hostTick(dt);
     const canMove = state === 'play';
@@ -1462,6 +1603,7 @@ function update(dt) {
   }
   if (wsDirty && clock - wsT > 0.1 && inMatch() && matchState()) { wsDirty = false; wsT = clock; net.send(wsMsg()); }
   if (goT > 0) goT -= dt;
+  boilerFx(dt);
   if (banner) { banner.t += dt; if (banner.t >= banner.life) banner = null; }
   for (let i = sparks.length - 1; i >= 0; i--) {
     const s = sparks[i];
@@ -1480,7 +1622,7 @@ const SERVER = serverMeta ? serverMeta.content : `${location.protocol === 'https
 // приглашение ведёт на сайт игры: с itch.io — на workers.dev, там вход по ссылке сразу в комнату
 const SITE = serverMeta ? SERVER.replace(/^ws/, 'http') + '/' : location.origin + location.pathname;
 // версия сетевых сообщений: игра есть и на своём сайте, и на itch.io — разные версии в одну комнату не пускаем
-const VERSION = 4;
+const VERSION = 5;
 let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
@@ -1680,6 +1822,7 @@ function syncMsg(to) {
     seats: matchSeats, roster, mode, tl: r1(timeLeft), ph: r1(phase), el: r1(elapsed), count: r1(countT), rush,
     evt: evt && { id: evt.id, t: r1(evt.t), team: evt.team, arg: evt.arg }, tally, result: lastResultMsg, ready,
     urgent: urgent && urgent.by < 0 ? { id: urgent.id, type: urgent.type, pts: urgent.pts, dur: urgent.dur, t: r1(urgent.t) } : null,
+    boiler: boiler && { id: boiler.id, holder: boiler.holder, from: boiler.from, dur: r1(boiler.dur), bt: r1(boiler.t), pt: r1(boiler.pt) },
     belt: belt.map(packItem), floor: hallFloor.map(packFloor), puddles: puddles.map(packPuddle),
   };
 }
@@ -1707,6 +1850,8 @@ function applySync(m) {
   if (m.evt) applyEvent(m.evt.id, +m.evt.t || 0.01, m.evt.team, m.evt.arg);
   urgent = null;
   if (m.urgent) applyUrgent(m.urgent, +m.urgent.t || 0.01);
+  boiler = null;
+  if (m.boiler) applyBoiler(m.boiler);
   if (m.tally) tally = m.tally;
   pending.clear();
   if (m.state === 'pause') {
@@ -1822,6 +1967,9 @@ function onNet(m, from) {
     case 'deliver': if (role === 'host') hostDeliver(m, fs, from); break;
     case 'dres': if (fromHost && m.to === myPid) onDeliverDenied(String(m.rid)); break;
     case 'bounty': if (m.to === myPid && fs >= 0) onBounty(m.pts, m.lead); break;
+    case 'boiler': if (fromHost && inMatch()) applyBoiler(m); break;
+    case 'boom': if (fromHost) applyBoom(m); break;
+    case 'bpass': if (role === 'host' && fs >= 0) hostPass(m, fs); break;
     case 'evtEnd': if (fromHost) onEvtEnd(); break;
     case 'oil': if (fromHost && Array.isArray(m.list)) puddles = m.list.map(o => unpackPuddle(o)); break;
     case 'brk': if (fromHost && inMatch()) applyBreakdown(m.type); break;
@@ -2132,7 +2280,7 @@ function drawPlayer(p, main, dark, box, lead) {
   }
   g.fillStyle = 'rgba(0,0,0,.28)'; g.beginPath(); g.ellipse(2, 5, 16, 12, 0, 0, PI * 2); g.fill();
   g.save();
-  g.rotate(Math.atan2(p.fy, p.fx));
+  g.rotate(Math.atan2(p.fy, p.fx) + (boilerOn() && p.stun > 0 ? clock * 16 : 0));   // в «Котле» от толчка кувыркаются
   const bob = Math.sin(p.walk) * 3 * p.moving, hx = p.hands.length ? 12 : 6;
   g.fillStyle = '#d9cfae'; g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = 1;
   for (const [ax, ay] of [[hx + bob, -11], [hx - bob, 11]]) { g.beginPath(); g.arc(ax, ay, 4.6, 0, PI * 2); g.fill(); g.stroke(); }
@@ -2228,10 +2376,53 @@ function drawScenePlayers() {
   const list = scenePlayers(), lead = leaderSeat();
   const flipped = viewFlipped();
   list.sort((a, b) => flipped ? b.y - a.y : a.y - b.y);
-  const carts = evt && evt.id === 'carts';
+  const carts = evt && evt.id === 'carts', seatOfP = p => p === me ? mySeat : p.seat;
+  const hot = boiler ? list.find(p => seatOfP(p) === boiler.holder) : null;
+  if (hot) drawHotRing(hot);
   for (const p of list) {
     if (p === me) drawPlayer(me, myColor(), darkOf(mySeat), up().cap > 0 || carts, mySeat === lead);
     else drawPlayer(p, colorOf(p.seat), darkOf(p.seat), p.hands.length > 1 || carts, p.seat === lead);
+    if (soot[seatOfP(p)] > 0) { g.save(); g.globalAlpha = Math.min(1, soot[seatOfP(p)]) * 0.7; dot(g, p.x, p.y, 12.5, '#1b1a18'); g.restore(); }
+  }
+  if (hot) drawBoilerOn(hot);
+}
+// «Котёл»: красное кольцо под тем, у кого котёл, и сам котёл над головой — стрелка манометра ползёт к красному
+function drawHotRing(p) {
+  g.save();
+  g.globalAlpha = 0.5 + 0.3 * Math.sin(clock * 9);
+  g.strokeStyle = C.alarm; g.lineWidth = 3; g.beginPath(); g.arc(p.x, p.y, 22, 0, PI * 2); g.stroke();
+  g.restore();
+}
+function drawBoilerOn(p) {
+  const k = Math.min(1, boiler.t / boiler.dur), hot = k > 0.75, j = hot ? (k - 0.75) * 12 : 0;   // перед взрывом трясётся
+  g.save();
+  g.translate(p.x + (Math.random() - .5) * j, over(p, 32) + (Math.random() - .5) * j);
+  if (viewFlipped()) g.rotate(PI);
+  g.scale(1.3, 1.3);
+  g.fillStyle = 'rgba(0,0,0,.25)'; g.beginPath(); g.ellipse(2, 13, 12, 4, 0, 0, PI * 2); g.fill();
+  rr(g, -12, -11, 24, 23, 7); g.fillStyle = '#b8642e'; g.fill();
+  g.strokeStyle = '#5e2f12'; g.lineWidth = 1.5; g.stroke();
+  g.fillStyle = '#7a3d18'; g.fillRect(-12, -6, 24, 2.5); g.fillRect(-12, 6.5, 24, 2.5);
+  for (const x of [-8.5, 8.5]) { dot(g, x, -4.8, 1, '#f0c08a'); dot(g, x, 7.8, 1, '#f0c08a'); }
+  g.fillStyle = '#6d7377'; g.fillRect(-2, -16, 4, 6); dot(g, 0, -16.5, 2.8, '#9aa3a8');   // клапан
+  dot(g, 0, 1, 6.6, '#f4f1e8');
+  g.strokeStyle = C.alarm; g.lineWidth = 2; g.beginPath(); g.arc(0, 1, 4.6, PI * 1.875, PI * 2.25); g.stroke();
+  const a = PI * 0.75 + k * PI * 1.5;
+  g.strokeStyle = '#1b1d18'; g.lineWidth = 1.4; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(0, 1); g.lineTo(Math.cos(a) * 5, 1 + Math.sin(a) * 5); g.stroke();
+  if (hot && Math.floor(clock * 10) % 2) { rr(g, -12, -11, 24, 23, 7); g.fillStyle = 'rgba(255,70,40,.35)'; g.fill(); }
+  g.restore();
+}
+// взрыв котла: белое кольцо пара расходится
+function drawBooms() {
+  for (const b of booms) {
+    if (b.sc !== me.scene) continue;
+    const k = b.t / 0.6;
+    g.save();
+    g.globalAlpha = (1 - k) * 0.8;
+    g.strokeStyle = '#f4f6f2'; g.lineWidth = 6 * (1 - k) + 1;
+    g.beginPath(); g.arc(b.x, b.y, 14 + k * 80, 0, PI * 2); g.stroke();
+    g.restore();
   }
 }
 // окна приёмки: закрыты, пока нет срочного заказа; открыто — видно, что ждут и сколько дадут
@@ -2322,6 +2513,7 @@ function drawDark() {
   for (const q of scenePlayers()) if (q !== me) light(q.x, q.y, 1.2 * T);
   for (const s of matchSeats) light((DOORS[s].c + 1) * T, (DOORS[s].r + 0.5) * T, 0.9 * T);
   if (urgent && urgent.by < 0) for (const w of WINDOWS) light(w.x + w.w / 2, w.y + w.h / 2, 1.3 * T);
+  if (boiler) { const p = boiler.holder === mySeat ? me : peers[boiler.holder]; if (p && (p === me || (p.here && p.scene === me.scene))) light(p.x, p.y, 1.7 * T); }
   light(4.5 * T, 6 * T, 0.75 * T);
   g.drawImage(darkCv, 0, 0, W, H);
 }
@@ -2355,6 +2547,7 @@ function drawHall() {
   drawScenePlayers();
   drawForklift();
   drawSparks();
+  drawBooms();
   drawDark();
   drawTexts();
 }
@@ -2369,6 +2562,7 @@ function drawWork() {
   drawTarget();
   drawScenePlayers();
   drawSparks();
+  drawBooms();
   drawTexts();
 }
 
@@ -2395,8 +2589,9 @@ const ACT_LABEL = {
 };
 let shownAct = '', shownTime = '', shownRush = null, shownEvt = null, shownRnd = '', shownOthers = '';
 function draw() {
-  if (viewFlipped()) g.setTransform(-scale, 0, 0, -scale, W * scale, H * scale);   // цех развёрнут на 180°
-  else g.setTransform(scale, 0, 0, scale, 0, 0);
+  const sx = shake > 0 ? (Math.random() - .5) * 12 * shake : 0, sy = shake > 0 ? (Math.random() - .5) * 12 * shake : 0;   // трясёт от взрыва котла
+  if (viewFlipped()) g.setTransform(-scale, 0, 0, -scale, (W + sx) * scale, (H + sy) * scale);   // цех развёрнут на 180°
+  else g.setTransform(scale, 0, 0, scale, sx * scale, sy * scale);
   if (me.scene === 'hall') drawHall(); else drawWork();
   g.setTransform(scale, 0, 0, scale, 0, 0);
   if (rush && state === 'play') {
@@ -2438,6 +2633,7 @@ function hudFrame() {
   if (state === 'play') {
     if (me.stun > 0) lbl = 'Ой!';
     else if (me.target) { if (ACT_LABEL[me.target.kind]) { lbl = ACT_LABEL[me.target.kind]; dim = false; } else lbl = 'Нельзя'; }
+    if (lbl === 'Толкнуть' && hasBoiler(mySeat)) lbl = 'Передать';
   }
   const key = lbl + (dim ? '0' : '1');
   if (key !== shownAct) { $('actl').textContent = lbl; $('act').classList.toggle('dim', dim); shownAct = key; }
@@ -2447,6 +2643,8 @@ function hudFrame() {
     if (rush) { parts.push('Аврал'); bad = true; }
     if (evt) parts.push(`${evt.short} · ${Math.max(1, Math.ceil(evt.dur - evt.t))} с`);
     if (urgent && urgent.by < 0) parts.push(`Срочно: ${PARTS[urgent.type].name.toLowerCase()} · ${Math.max(1, Math.ceil(urgent.dur - urgent.t))} с`);
+    if (boiler && boiler.holder === mySeat) { parts.unshift('У вас котёл — толкайтесь!'); bad = true; }
+    else if (boiler && SEAT[boiler.holder]) parts.push(`Котёл у ${SEAT[boiler.holder].gen}`);
     const broken = machines.filter(m => m.broken > 0).map(m => MACHINES[m.type].tag);
     if (broken.length) { parts.push('Чинить: ' + broken.join(', ')); if (!evt) bad = true; }
     const o = ownerOf(me.scene);
@@ -2504,7 +2702,7 @@ function renderOthers() {
   // напарник — первым и с ободком у кружка, передовик «Схватки» — со звёздочкой
   const list = (matchState() || state === 'over' ? matchSeats : roster.map(e => e.seat)).filter(s => s !== mySeat).sort((a, b) => isMate(b) - isMate(a) || a - b);
   const lead = leaderSeat();
-  const rows = list.map(s => [s, liveScore(s), (s === lead ? '★ ' : '') + whereOf(s), isMate(s)]);
+  const rows = list.map(s => [s, liveScore(s), (s === lead ? '★ ' : '') + (hasBoiler(s) ? '♨ ' : '') + whereOf(s), isMate(s)]);
   const key = JSON.stringify(rows);
   if (key === shownOthers) return;
   shownOthers = key;
@@ -2527,6 +2725,7 @@ const teamLive = t => teamSeats(t).reduce((a, s) => a + liveScore(s), 0);
 function whoText() {
   if (mySeat < 0) return 'Вы';
   if (teamsOn() && inMatch()) return `Вы · ${TEAMS[teamOf(mySeat)].short}`;
+  if (hasBoiler(mySeat) && inMatch()) return 'Вы · с котлом';
   return leaderSeat() === mySeat ? 'Вы · передовик' : `Вы · ${SEAT[mySeat].name.toLowerCase()}`;
 }
 function renderHud() {
@@ -2974,6 +3173,9 @@ if (DEBUG) {
     event: id => { if (role === 'host') { evt = null; startEvent(id); } },
     urgentNow: type => { if (role === 'host' && state === 'play') { if (urgent) endUrgent(-1, ''); startUrgent(type); } },
     target: () => { const t = findTarget(me); return t && t.kind; },
+    get boiler() { return boiler; }, get soot() { return soot; },
+    boilerNow: s => { if (role === 'host' && state === 'play') { boiler = null; startBoiler(s); } },
+    boomSoon: () => { if (role === 'host' && boiler) boiler.t = boiler.dur - 0.05; },
     get cap() { return capOf(); }, forklift, liftAhead: d => { const f = forklift(); return f && liftAt(f.s + evt.arg[1] * d); },
     // цвет точки цеха на экране — для проверки темноты и ящиков
     pixel(x, y) {
