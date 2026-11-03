@@ -6,6 +6,7 @@ import {
   T, COLS, ROWS, W, H, PI, C, FONT_D, FONT_B, PARTS, ORDER_KEYS, RAW, RAW_OF, MACHINES, PRODUCTS, UPGRADES, EVENTS,
   zeroCounts, rr, dot, drawItem, iconImg, hazard, mulberry32, plural, fmt,
 } from './art.js';
+import { makeBot } from './bot.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('game');
@@ -14,6 +15,11 @@ const hashArgs = new URLSearchParams(location.hash.slice(1));
 const DEBUG = hashArgs.has('debug');
 const LAG = Math.max(0, +hashArgs.get('lag') || 0);   // искусственная задержка отправки, мс — для проверки
 const CALM = hashArgs.has('calm');   // для проверки: события и срочные заказы — только по команде
+// игра с ботами: сервер не нужен, все в одной вкладке. Бот — эта же страница в невидимом фрейме:
+// в адресе уровень бота и его номер, ходит и жмёт «действие» за него bot.js, а кадры ему даёт страница игрока
+const BOT = ['easy', 'normal', 'hard'].includes(hashArgs.get('bot')) ? hashArgs.get('bot') : '';
+const FAST = DEBUG ? Math.max(1, Math.min(8, Math.floor(+hashArgs.get('fast') || 1))) : 1;   // для проверки: время идёт в FAST раз быстрее
+const AUTO = DEBUG && ['easy', 'normal', 'hard'].includes(hashArgs.get('auto')) ? hashArgs.get('auto') : '';   // для проверки: за игрока ходит бот
 
 const FLOOR = 0, WALL = 1, BELT = 2, ISLAND = 3, BENCH = 4, MACH = 5, DOOR = 6;
 const R = 15, SPEED = 160, RUSH_AT = 20, GUARD = 1.2, SEND_EVERY = 1 / 15, SEATS = 4;
@@ -143,6 +149,8 @@ const pending = new Map();       // детали из цеха, взятые д�
 const pendingW = new Map();      // что утащили в чужой мастерской до ответа её хозяина
 let idSeq = 0, ridSeq = 0, sendT = 0, pressT = 0, lastSent = '', lastSentAt = -9, wsDirty = false, wsT = 0;
 let mode = 'classic';            // режим матча: classic, teams, brawl — выбирает создатель комнаты
+// игра с ботами: { mode, level, bots, rounds, dur } — у игрока; фреймы ботов и срок, за который они должны прийти
+let solo = null, botFrames = [], soloT = 0;
 // срочный заказ (ведёт создатель) и наша сдача, пока создатель не ответил
 let urgent = null, urgentAt = 0, urgentSeq = 0, pendingD = null;
 // «Котёл»: у кого он и сколько ему осталось (ведёт создатель), когда появится следующий; взрывы для картинки
@@ -407,7 +415,7 @@ function say(msg) {
   me.msgCd = 0.9;
   sfx.nope();
 }
-function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
+function buzz(ms) { try { if (!BOT && navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
 // ---------- быстрые фразы над головой ----------
 const PHRASES = ['Отдай!', 'Спасибо!', 'Бегу!', 'Ха-ха!', 'Помогите!', 'Сюда!', 'Не трогай!', 'Ну всё…'];
 const bubbles = {};   // место → { i, t }: какая фраза и сколько уже висит
@@ -431,6 +439,7 @@ function showBanner(title, desc, color = C.hazard) { banner = { title, desc, col
 let actx = null, muted = false;
 try { muted = localStorage.getItem('ceh7-muted') === '1'; } catch (e) {}
 function ensureAudio() {
+  if (BOT) return;   // у ботов звука нет
   if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; } }
   if (actx && actx.state === 'suspended') actx.resume().catch(() => {});
 }
@@ -495,11 +504,13 @@ const GAME_KEYS = new Set(Object.values(KEYS).flat());
 const actionQueue = [];
 const playing = () => state === 'play' || state === 'count';
 function queueAction() { if (state === 'play') actionQueue.push(1); }
+let botVec = { x: 0, y: 0 };      // куда идёт бот — по цеху, не по экрану
 function readInput() {
   const on = a => a.some(k => keys.has(k));
   let x = (on(KEYS.right) ? 1 : 0) - (on(KEYS.left) ? 1 : 0);
   let y = (on(KEYS.down) ? 1 : 0) - (on(KEYS.up) ? 1 : 0);
   if (!x && !y && Math.hypot(touchVec.x, touchVec.y) >= 0.18) { x = touchVec.x; y = touchVec.y; }
+  if (BOT || AUTO) { x = botVec.x; y = botVec.y; }
   if (evt && evt.id === 'mixup') { x = -x; y = -y; }   // «Провода перепутались»
   // цех развёрнут: «вверх» на экране — это вниз по цеху
   return viewFlipped() ? { x: -x, y: -y } : { x, y };
@@ -516,7 +527,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => { keys.delete(e.code); });
 addEventListener('blur', () => keys.clear());
-document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(true); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && !BOT) pauseGame(true); });
 document.addEventListener('gesturestart', e => e.preventDefault());
 
 function setupStick(zone) {
@@ -1770,12 +1781,56 @@ let token = '';
 try { token = sessionStorage.getItem('ceh7-token') || ''; } catch (e) {}
 if (!token) { token = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8); try { sessionStorage.setItem('ceh7-token', token); } catch (e) {} }
 
+// комната без сервера — для игры с ботами: всё как у сервера src/worker.js, только внутри вкладки.
+// Живёт у игрока, боты из своих фреймов берут её у родителя. Письма лежат в ящике, пока получатель не заберёт их своим кадром
+const SOLO = 'solo';
+function makeHub() {
+  const conns = [];
+  let seq = 0;
+  const put = (c, s) => c.inbox.push(s);
+  return {
+    join(role) {
+      const c = { pid: (role === 'host' ? 'h' : 'b') + (++seq), role, inbox: [] };
+      put(c, JSON.stringify({ t: 'hi', pid: c.pid, peers: conns.map(x => ({ pid: x.pid, role: x.role })) }));
+      for (const x of conns) put(x, JSON.stringify({ t: 'join', pid: c.pid, role }));
+      conns.push(c);
+      return c;
+    },
+    send(c, s) {
+      if (!conns.includes(c)) return;
+      const out = c.pid + '|' + s;
+      for (const x of conns) if (x !== c) put(x, out);
+    },
+    leave(c) {
+      const i = conns.indexOf(c);
+      if (i < 0) return;
+      conns.splice(i, 1);
+      for (const x of conns) put(x, JSON.stringify({ t: 'leave', pid: c.pid }));
+    },
+  };
+}
+
 const net = {
-  ws: null, room: '', role: '', want: false, ok: false, tries: 0, timer: 0, pingT: 0, lastRx: 0,
+  ws: null, room: '', role: '', want: false, ok: false, tries: 0, timer: 0, pingT: 0, lastRx: 0, hub: null, conn: null,
   open(room, r) {
     this.close();
     this.room = room; this.role = r; this.want = true; this.tries = 0;
+    if (room === SOLO) {
+      try { this.hub = BOT ? parent.__ceh7hub : (window.__ceh7hub = makeHub()); } catch (e) { this.hub = null; }
+      if (!this.hub) { this.want = false; return; }
+      this.conn = this.hub.join(r); this.ok = true;
+      return;
+    }
     this.connect();
+  },
+  // письмо от сервера — чистый JSON, от игроков — «номер|JSON»
+  receive(d) {
+    if (typeof d !== 'string' || d === 'pong') return;
+    let from = '', body = d;
+    if (d[0] !== '{') { const k = d.indexOf('|'); if (k < 0) return; from = d.slice(0, k); body = d.slice(k + 1); }
+    let m;
+    try { m = JSON.parse(body); } catch (err) { return; }
+    if (m && typeof m.t === 'string') { try { onNet(m, from); } catch (err) { console.error(err); } }
   },
   connect() {
     clearTimeout(this.timer);
@@ -1800,14 +1855,7 @@ const net = {
     ws.onmessage = e => {
       if (ws !== this.ws) return;
       this.lastRx = performance.now();
-      const d = e.data;
-      if (typeof d !== 'string' || d === 'pong') return;
-      // от сервера — чистый JSON, от игроков — «номер|JSON»
-      let from = '', body = d;
-      if (d[0] !== '{') { const k = d.indexOf('|'); if (k < 0) return; from = d.slice(0, k); body = d.slice(k + 1); }
-      let m;
-      try { m = JSON.parse(body); } catch (err) { return; }
-      if (m && typeof m.t === 'string') { try { onNet(m, from); } catch (err) { console.error(err); } }
+      this.receive(e.data);
     };
     ws.onclose = e => {
       clearTimeout(stuck);
@@ -1826,6 +1874,7 @@ const net = {
     refreshStatus();
   },
   send(m) {
+    if (this.conn) { this.hub.send(this.conn, JSON.stringify(m)); return; }
     const ws = this.ws;
     if (!ws || ws.readyState !== 1) return;
     const s = JSON.stringify(m);
@@ -1838,8 +1887,16 @@ const net = {
     const ws = this.ws;
     this.ws = null; this.ok = false; online.clear();
     if (ws) { try { ws.close(1000, 'bye'); } catch (e) {} }
+    if (this.conn) { try { this.hub.leave(this.conn); } catch (e) {} }
+    this.conn = null; this.hub = null;
   },
   tick(dt) {
+    if (this.conn) {
+      const c = this.conn, box = c.inbox;
+      c.inbox = [];
+      for (const d of box) { if (this.conn !== c) break; this.receive(d); }
+      return;
+    }
     if (!this.ws || !this.ok) return;
     this.pingT -= dt;
     if (this.pingT <= 0) { this.pingT = 4; try { this.ws.send('ping'); } catch (e) {} }
@@ -1923,7 +1980,7 @@ function onShoved(m, by) {
 function setSeat(s) {
   if (s === mySeat) return;
   mySeat = s;
-  flip = s >= 0 && !doorBottom(s);
+  flip = !BOT && !AUTO && s >= 0 && !doorBottom(s);   // бот на экран не смотрит
   document.body.dataset.seat = s >= 0 ? String(s) : '0';
   $('meWho').textContent = whoText();
   clearLayers();
@@ -1958,6 +2015,7 @@ function hostWelcome(pid, v, name) {
   e.name = cleanName(name);
   broadcastRoster();
   net.send(syncMsg(pid));
+  soloCheck();
 }
 function syncMsg(to) {
   const ready = {};
@@ -2919,6 +2977,7 @@ function whoText() {
   return leaderSeat() === mySeat ? 'Вы · передовик' : `Вы · ${myName || SEAT[mySeat].name.toLowerCase()}`;
 }
 function renderHud() {
+  if (BOT) return;
   // в командах — счёт смен: ваша первой
   const duo = teamsOn() && inMatch(), t = teamOf(mySeat);
   $('meScore').textContent = mySeat < 0 ? 0 : duo ? `${teamLive(t)}:${teamLive(1 - t)}` : liveScore(mySeat);
@@ -2940,7 +2999,7 @@ function renderHud() {
 
 // ---------- экраны ----------
 const overlay = $('overlay');
-const sheets = { menu: $('menuSheet'), lobby: $('lobbySheet'), wait: $('waitSheet'), pause: $('pauseSheet'), shop: $('shopSheet'), over: $('overSheet') };
+const sheets = { menu: $('menuSheet'), solo: $('soloSheet'), lobby: $('lobbySheet'), wait: $('waitSheet'), pause: $('pauseSheet'), shop: $('shopSheet'), over: $('overSheet') };
 function showSheet(name) {
   overlay.hidden = false;
   for (const k in sheets) sheets[k].hidden = k !== name;
@@ -2970,6 +3029,7 @@ function renderRoster() {
   }
 }
 function refreshStatus() {
+  if (BOT) return;
   const host = role === 'host';
   const here = roster.filter(e => isOn(e.seat)).length;
   let t, k;
@@ -2989,12 +3049,13 @@ function refreshStatus() {
   if (!net.ok) setStatus($('pauseStatus'), 'Нет связи с сервером, переподключаемся…', 'bad');
   else if (!hostOnline()) setStatus($('pauseStatus'), 'Создатель комнаты не на связи, ждём…', 'wait');
   else if (missing.length) setStatus($('pauseStatus'), `Нет на связи: ${namesOf(missing)}. Можно продолжить и без них`, 'wait');
-  else setStatus($('pauseStatus'), 'Все на связи', 'ok');
+  else setStatus($('pauseStatus'), solo ? 'Боты ждут, пока вы вернётесь' : 'Все на связи', 'ok');
   $('btnResume').disabled = !(net.ok && hostOnline());
   setStatus($('waitStatus'), !net.ok ? 'Нет связи с сервером, переподключаемся…' : `Сейчас играют: ${namesOf(matchSeats)}`, net.ok ? 'wait' : 'bad');
   if (!net.ok) setStatus($('overStatus'), 'Нет связи с сервером', 'bad');
   else setStatus($('overStatus'), host ? '' : 'Новый матч начинает создатель комнаты', 'ok');
   $('btnAgain').hidden = !host;
+  $('btnAgain').textContent = solo ? 'Ещё раз' : 'Новый матч';
   if (state === 'shop') renderShop();
 }
 function inviteUrl() { return `${SITE}?room=${net.room}`; }
@@ -3045,6 +3106,7 @@ function showShop() {
   showSheet('shop');
 }
 function renderShop(flashId) {
+  if (BOT) return;
   const el = $('shopBody'), r = lastRes || { s: 0, earn: 0, rank: 1, n: 2 };
   let res = r.rank === 1 ? 'Раунд ваш!' : r.n === 2 ? 'Раунд за соперником' : `${r.rank}-е место в раунде`;
   let sub = `+${r.s} ${plural(r.s, ['очко', 'очка', 'очков'])} за раунд · всего ${tally.total[mySeat] || 0} · заработано ${r.earn} ₽`;
@@ -3199,8 +3261,9 @@ function showTeamFinal() {
 }
 
 // ---------- комната ----------
-function saveSeat() { try { sessionStorage.setItem('ceh7-seat', JSON.stringify({ room: net.room, role })); } catch (e) {} }
-function clearSeat() { try { sessionStorage.removeItem('ceh7-seat'); } catch (e) {} }
+// игру с ботами после перезагрузки не продолжаем; у ботов место не запоминаем — хранилище вкладки у них общее с игроком
+function saveSeat() { if (net.room === SOLO) return; try { sessionStorage.setItem('ceh7-seat', JSON.stringify({ room: net.room, role })); } catch (e) {} }
+function clearSeat() { if (BOT) return; try { sessionStorage.removeItem('ceh7-seat'); } catch (e) {} }
 function enterRoom(code, r) {
   role = r;
   roster = []; matchSeats = []; myPid = ''; hostPid = '';
@@ -3210,12 +3273,14 @@ function enterRoom(code, r) {
   me = makePlayer(); order = null; score = 0;
   net.open(code, r);
   saveSeat();
+  if (solo && r === 'host') { state = 'lobby'; return; }   // с ботами комнаты не показываем: матч начнётся, как только все придут
   showLobby();
 }
 function leaveRoom(msg) {
   net.send({ t: 'bye' });
   net.close();
   clearSeat();
+  if (solo) { killBots(); solo = null; clearTimeout(soloT); try { window.__ceh7hub = null; } catch (e) {} }
   role = ''; state = 'menu'; roster = []; matchSeats = [];
   setSeat(-1);
   releaseAwake();
@@ -3242,6 +3307,100 @@ function restoreSeat() {
   if (seat && /^\d{4}$/.test(seat.room) && (seat.role === 'host' || seat.role === 'guest')) enterRoom(seat.room, seat.role);
   else showSheet('menu');
 }
+// ---------- игра с ботами ----------
+// боты — эта же игра в невидимых фреймах: и мастерская своя, и воруют так же. По именам видно, насколько они хороши
+const BOT_NAMES = { easy: ['Стажёр', 'Практикант', 'Новичок'], normal: ['Петрович', 'Михалыч', 'Семёныч'], hard: ['Бригадир', 'Мастер', 'Технолог'] };
+const LEVEL_DESC = {
+  easy: 'Лёгкие боты ходят не спеша, путаются и почти не мешают.',
+  normal: 'Средние работают бодро, иногда толкаются и заглядывают к вам за деталями.',
+  hard: 'Сложные быстрые и хитрые: воруют, толкаются, ловят срочные заказы и кота.',
+};
+const soloRadio = name => { const el = document.querySelector(`input[name="${name}"]:checked`); return el ? el.value : ''; };
+function soloOpts() {
+  const mode = MODES[soloRadio('smode')] ? soloRadio('smode') : 'classic', level = BOT_NAMES[soloRadio('slevel')] ? soloRadio('slevel') : 'normal';
+  let bots = Math.max(1, Math.min(3, +soloRadio('sbots') || 3));
+  if (mode === 'teams') bots = Math.max(2, bots);   // в командах нужно хотя бы трое
+  const dur = +soloRadio('sdur');
+  return { mode, level, bots, rounds: +soloRadio('srounds') === 5 ? 5 : 3, dur: [60, 90, 120].includes(dur) ? dur : 90 };
+}
+function renderSolo() {
+  const one = document.querySelector('input[name="sbots"][value="1"]'), teams = soloRadio('smode') === 'teams';
+  one.disabled = teams;
+  if (teams && one.checked) document.querySelector('input[name="sbots"][value="2"]').checked = true;
+  const o = soloOpts();
+  $('soloDesc').textContent = MODES[o.mode].desc;
+  $('soloLevel').textContent = LEVEL_DESC[o.level];
+}
+function showSolo() {
+  renderSolo();
+  setStatus($('soloStatus'), '');
+  $('btnSoloGo').disabled = false;
+  showSheet('solo');
+}
+function startSolo() {
+  const o = soloOpts();
+  try { localStorage.setItem('ceh7-solo', JSON.stringify(o)); } catch (e) {}
+  ensureAudio();
+  solo = o;
+  mode = o.mode; rounds = o.rounds; duration = o.dur;
+  enterRoom(SOLO, 'host');
+  setStatus($('soloStatus'), o.bots > 1 ? 'Зовём ботов…' : 'Зовём бота…', 'wait');
+  $('btnSoloGo').disabled = true;
+  killBots();
+  for (let i = 0; i < o.bots; i++) {
+    const el = document.createElement('iframe');
+    el.className = 'botframe'; el.tabIndex = -1; el.title = 'Бот'; el.setAttribute('aria-hidden', 'true');
+    el.src = `${location.pathname}#bot=${o.level}&n=${i}${DEBUG ? '&debug' : ''}`;
+    document.body.appendChild(el);
+    botFrames.push({ el, step: null });
+  }
+  clearTimeout(soloT);
+  soloT = setTimeout(() => {
+    if (!solo || state !== 'lobby') return;
+    leaveRoom();
+    showSolo();
+    setStatus($('soloStatus'), 'Боты не пришли. Попробуйте ещё раз или обновите страницу', 'bad');
+  }, 15000);
+}
+function killBots() { for (const b of botFrames) b.el.remove(); botFrames = []; }
+// кадр ботам — вместе с кадром игрока
+function stepBots(dt) {
+  for (const b of botFrames) {
+    if (!b.step) { try { const w = b.el.contentWindow; if (w && w.__ceh7bot) b.step = w.__ceh7bot.step; } catch (e) {} }
+    if (b.step) { try { b.step(dt); } catch (e) { console.error(e); } }
+  }
+}
+// все боты пришли — сразу в игру
+function soloCheck() {
+  if (solo && role === 'host' && state === 'lobby' && roster.filter(e => isOn(e.seat)).length > solo.bots) soloGo();
+}
+function soloGo() {
+  clearTimeout(soloT);
+  mode = solo.mode; rounds = solo.rounds; duration = solo.dur;
+  matchSeats = roster.filter(e => isOn(e.seat)).map(e => e.seat).sort();
+  net.send({ t: 'match', rounds, duration, seats: matchSeats, mode });
+  startMatchLocal();
+  hostStartRound(1);
+}
+// что видит и делает бот (bot.js) — то же, что игрок видит на экране
+function botApi() {
+  return {
+    get state() { return state; }, get me() { return me; }, get seat() { return mySeat; }, get seats() { return matchSeats; },
+    get mode() { return mode; }, get peers() { return peers; }, get belt() { return belt; }, get hallFloor() { return hallFloor; },
+    get workFloor() { return workFloor; }, get machines() { return machines; }, get mirrors() { return mirrors; }, get order() { return order; },
+    get evt() { return evt; }, get urgent() { return urgent; }, get pendingD() { return pendingD; }, get boiler() { return boiler; },
+    get wallet() { return wallet; }, get ready() { return myReady; }, get clock() { return clock; }, get stats() { return stats; },
+    get benchBusy() { return bench.doneT > 0; }, get timeLeft() { return timeLeft; },
+    R, SPEED, DOORS, SEG, L, LIFT_SPEED, CAT_SPEED,
+    cap: capOf, needs, beltS, beltSpeed: beltSpeedNow, pathPos, solidAt, doorOpen, isOn, rivals, isMate, leader: leaderSeat,
+    roundScore, hasBoiler, backPass, cat, forklift, liftAt,
+    target: () => findTarget(me), act: queueAction, say: sayPhrase, buy,
+    move(x, y) { botVec = { x, y }; },
+    face(x, y) { const d = Math.hypot(x, y); if (d > 0) { me.fx = x / d; me.fy = y / d; } },
+    setReady() { if (state !== 'shop' || myReady) return; myReady = true; net.send({ t: 'ready', on: true }); renderShop(); hostMaybeNext(); },
+  };
+}
+
 // во фрейме itch.io часть возможностей браузера закрыта — их не трогаем, чтобы не сыпать ошибками в консоль
 const policy = document.permissionsPolicy || document.featurePolicy;
 const allowed = feature => !policy || policy.allowsFeature(feature);
@@ -3276,6 +3435,7 @@ function flashShare(text) {
 
 let wakeLock = null;
 async function keepAwake() {
+  if (BOT) return;
   try {
     if ('wakeLock' in navigator && !wakeLock && allowed('screen-wake-lock')) {
       wakeLock = await navigator.wakeLock.request('screen');
@@ -3286,6 +3446,18 @@ async function keepAwake() {
 function releaseAwake() { try { if (wakeLock) wakeLock.release(); } catch (e) {} wakeLock = null; }
 
 $('btnCreate').addEventListener('click', () => { ensureAudio(); $('menuMsg').hidden = true; enterRoom(newCode(), 'host'); });
+$('btnSolo').addEventListener('click', () => { ensureAudio(); $('menuMsg').hidden = true; showSolo(); });
+$('btnSoloGo').addEventListener('click', () => { if (!solo) startSolo(); });
+$('btnSoloBack').addEventListener('click', () => { if (solo) leaveRoom(); else showSheet('menu'); });
+document.querySelectorAll('#soloSheet input').forEach(r => r.addEventListener('change', renderSolo));
+// прошлые настройки игры с ботами
+try {
+  const o = JSON.parse(localStorage.getItem('ceh7-solo') || 'null') || {};
+  for (const [name, v] of [['smode', o.mode], ['slevel', o.level], ['sbots', o.bots], ['srounds', o.rounds], ['sdur', o.dur]]) {
+    const el = [...document.querySelectorAll(`input[name="${name}"]`)].find(x => x.value === String(v));
+    if (el) el.checked = true;
+  }
+} catch (e) {}
 $('joinCode').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); });
 $('joinForm').addEventListener('submit', e => {
   e.preventDefault();
@@ -3333,6 +3505,7 @@ document.querySelectorAll('input[name="rounds"],input[name="dur"],input[name="mo
 }));
 $('btnAgain').addEventListener('click', () => {
   if (role !== 'host') return;
+  if (solo) { soloGo(); return; }   // с ботами — сразу ещё матч с теми же настройками
   startMatchLocal();
   showLobby();
   net.send({ t: 'lobby', rounds, duration, mode });
@@ -3372,7 +3545,7 @@ document.addEventListener('fullscreenchange', syncFull);
 document.addEventListener('webkitfullscreenchange', syncFull);
 
 const landscape = matchMedia('(pointer: coarse) and (orientation: landscape) and (max-height: 560px)');
-const onOrient = () => { if (landscape.matches) pauseGame(true); };
+const onOrient = () => { if (landscape.matches && !BOT) pauseGame(true); };
 if (landscape.addEventListener) landscape.addEventListener('change', onOrient);
 else if (landscape.addListener) landscape.addListener(onOrient);
 
@@ -3421,7 +3594,7 @@ if (DEBUG) {
     catAhead: d => { const c = cat(); return c && pathPos(c.s + evt.arg[1] * d); },
     boilerNow: s => { if (role === 'host' && state === 'play') { boiler = null; startBoiler(s); } },
     boomSoon: () => { if (role === 'host' && boiler) boiler.t = boiler.dur - 0.05; },
-    get cap() { return capOf(); }, forklift, liftAhead: d => { const f = forklift(); return f && liftAt(f.s + evt.arg[1] * d); },
+    get cap() { return capOf(); }, forklift, get soloGame() { return solo; }, get bots() { return botFrames.map(b => b.el.contentWindow); }, liftAhead: d => { const f = forklift(); return f && liftAt(f.s + evt.arg[1] * d); },
     // цвет точки цеха на экране — для проверки темноты и ящиков
     pixel(x, y) {
       const fl = viewFlipped(), px = Math.round((fl ? W - x : x) * scale), py = Math.round((fl ? H - y : y) * scale);
@@ -3435,13 +3608,24 @@ if (DEBUG) {
 syncSound();
 fitCanvas();
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(clearLayers);
-restoreSeat();
-let last = performance.now();
+let last = performance.now(), autoBrain = null;
 function frame(now) {
   const dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
   last = now;
-  update(dt);
+  for (let k = 0; k < FAST; k++) { if (autoBrain) autoBrain.tick(dt); update(dt); stepBots(dt); }
   draw();
   requestAnimationFrame(frame);
 }
-requestAnimationFrame(frame);
+if (BOT) {
+  // бот: сам не рисует и кадров не ждёт — их даёт страница игрока; входит в её комнату без сервера
+  muted = true;
+  myName = BOT_NAMES[BOT][Math.max(0, Math.min(2, Math.floor(+hashArgs.get('n') || 0)))];
+  const brain = makeBot(botApi(), BOT);
+  window.__ceh7bot = { step(dt) { brain.tick(dt); update(dt); } };
+  if (DEBUG) window.__t.brain = brain;
+  enterRoom(SOLO, 'guest');
+} else {
+  if (AUTO) autoBrain = makeBot(botApi(), AUTO);
+  restoreSeat();
+  requestAnimationFrame(frame);
+}

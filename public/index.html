@@ -215,6 +215,10 @@ kbd{
 .dur.modes legend{float:none;width:auto;margin:0 0 6px}
 .dur.modes label{flex:1 1 0;min-width:0}
 .dur.modes span{display:block;text-align:center;font:600 14px/1 var(--f-body);padding:9px 4px}
+.dur input:disabled+span{opacity:.35;cursor:default}
+.opts .mode-desc{margin:-2px 0 4px}
+/* боты — та же игра в невидимых фреймах */
+.botframe{position:fixed;left:0;top:0;width:2px;height:2px;border:0;opacity:0;pointer-events:none;visibility:hidden}
 
 /* магазин */
 .shop-head{display:flex;justify-content:space-between;align-items:flex-end;gap:10px}
@@ -391,10 +395,11 @@ kbd{
   <div class="sheet" id="menuSheet">
     <div class="tape"></div>
     <div class="sheet-body">
-      <p class="eyebrow">Онлайн · от 2 до 4 игроков</p>
+      <p class="eyebrow">Онлайн · 2–4 игрока · или с ботами</p>
       <h1>Цех № 7</h1>
       <p class="lead">Общая лента в цехе и у каждого своя мастерская. Хватайте детали, делайте их на станках, собирайте заказы — и наведывайтесь к соперникам за чужим добром.</p>
       <button class="btn primary wide" id="btnCreate" type="button">Создать игру</button>
+      <button class="btn wide" id="btnSolo" type="button">Играть одному — с ботами</button>
       <p class="or">или войдите по коду</p>
       <form class="join" id="joinForm">
         <input id="joinCode" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="0000" aria-label="Код комнаты">
@@ -405,6 +410,7 @@ kbd{
         <h3>Как играть</h3>
         <ul class="rules">
           <li>Играют от двух до четырёх человек, у каждого свой телефон или компьютер. Создатель комнаты отправляет остальным код или ссылку.</li>
+          <li>Не с кем играть — «Играть одному»: свободные места займут боты, сложность на выбор. Сервер для этого не нужен.</li>
           <li>Детали приходят на ленту в общем цехе. Хватайте нужные и несите через свою дверь в мастерскую.</li>
           <li>В мастерской ваши станки и верстак. Стекло, корпус, катушку, модуль и привод делают на станках, остальное кладут на верстак сразу.</li>
           <li>Через чужую дверь можно зайти в мастерскую соперника и утащить детали с пола или готовое из станков. Чужими станками и верстаком пользоваться нельзя.</li>
@@ -453,6 +459,53 @@ kbd{
       </div>
       <p class="keys-note">С клавиатуры: <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> или стрелки, действие — <kbd>E</kbd>, <kbd>Пробел</kbd> или <kbd>Enter</kbd>, фразы — <kbd>1</kbd>–<kbd>8</kbd>, пауза — <kbd>Esc</kbd>.</p>
       <div class="actions"><button class="btn sound-btn" type="button">Звук: вкл</button><button class="btn full-btn only-fine" type="button">На весь экран</button></div>
+    </div>
+  </div>
+
+  <div class="sheet" id="soloSheet" hidden>
+    <div class="tape"></div>
+    <div class="sheet-body">
+      <p class="eyebrow">Один против ботов</p>
+      <h2>Игра с ботами</h2>
+      <div class="opts">
+        <fieldset class="dur modes">
+          <legend>Режим:</legend>
+          <label><input type="radio" name="smode" value="classic" checked><span>Классика</span></label>
+          <label><input type="radio" name="smode" value="teams"><span>Команды</span></label>
+          <label><input type="radio" name="smode" value="brawl"><span>Схватка</span></label>
+          <label><input type="radio" name="smode" value="boiler"><span>Котёл</span></label>
+        </fieldset>
+        <p class="mode-desc" id="soloDesc"></p>
+        <fieldset class="dur modes">
+          <legend>Сложность:</legend>
+          <label><input type="radio" name="slevel" value="easy"><span>Лёгкие</span></label>
+          <label><input type="radio" name="slevel" value="normal" checked><span>Средние</span></label>
+          <label><input type="radio" name="slevel" value="hard"><span>Сложные</span></label>
+        </fieldset>
+        <p class="mode-desc" id="soloLevel"></p>
+        <fieldset class="dur">
+          <legend>Ботов:</legend>
+          <label><input type="radio" name="sbots" value="1"><span>1</span></label>
+          <label><input type="radio" name="sbots" value="2"><span>2</span></label>
+          <label><input type="radio" name="sbots" value="3" checked><span>3</span></label>
+        </fieldset>
+        <fieldset class="dur">
+          <legend>Раундов:</legend>
+          <label><input type="radio" name="srounds" value="3" checked><span>3</span></label>
+          <label><input type="radio" name="srounds" value="5"><span>5</span></label>
+        </fieldset>
+        <fieldset class="dur">
+          <legend>Раунд:</legend>
+          <label><input type="radio" name="sdur" value="60"><span>60 с</span></label>
+          <label><input type="radio" name="sdur" value="90" checked><span>90 с</span></label>
+          <label><input type="radio" name="sdur" value="120"><span>2 мин</span></label>
+        </fieldset>
+      </div>
+      <p class="status" id="soloStatus" hidden></p>
+      <div class="actions">
+        <button class="btn primary" id="btnSoloGo" type="button">Начать</button>
+        <button class="btn" id="btnSoloBack" type="button">Назад</button>
+      </div>
     </div>
   </div>
 
